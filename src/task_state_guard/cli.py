@@ -8,6 +8,7 @@ import json
 import sys
 from typing import Any, Dict, Optional, Sequence
 
+from . import __version__
 from .model import DeliveryStatus, InvalidInput, LedgerError, TaskStatus
 from .reconcile import ReconcilePolicy, reconcile_restart
 from .store import Ledger
@@ -28,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = SafeArgumentParser(
         prog="task-state-guard",
         description="Crash-safe task metadata without plaintext payload storage.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s " + __version__,
     )
     parser.add_argument("--db", required=True, help="Path to the local SQLite database")
     parser.add_argument(

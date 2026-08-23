@@ -900,6 +900,19 @@ class LedgerTestCase(unittest.TestCase):
         )
         self.assertTrue(_ledger(database).doctor()["healthy"])
 
+    def test_module_version_is_stable(self):
+        module = subprocess.run(
+            [sys.executable, "-m", "task_state_guard", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(module.returncode, 0)
+        self.assertEqual(module.stderr, "")
+        self.assertEqual(module.stdout, "task-state-guard 0.1.0\n")
+
     def test_schema_spoof_is_rejected_and_v1_migrates(self):
         spoofed = Path(self.tempdir.name) / "spoofed.sqlite"
         with _sqlite_connection(spoofed) as connection:

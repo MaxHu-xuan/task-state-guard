@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a narrowly scoped addition to the public state-ledger contract.
+title: "[Feature] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        TaskStateGuard records state; it does not schedule, execute, retry, or deliver tasks. Proposals must preserve the privacy-minimal storage and fail-closed filesystem boundaries.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundary checks
+      options:
+        - label: The proposal uses synthetic examples and contains no confidential data.
+          required: true
+        - label: The proposal does not require storing task bodies, prompts, credentials, paths, or free-form error text.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the general public use case without private deployment details.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed public behavior
+      description: Define inputs, outputs, state transitions, failure behavior, and compatibility impact.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true

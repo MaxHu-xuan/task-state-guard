@@ -1,5 +1,11 @@
 # TaskStateGuard（任务状态守护）
 
+Crash-safe task and delivery state without storing task bodies.
+
+一个不保存任务正文、能在进程重启后如实收敛任务与投递状态的 SQLite 状态机。
+
+[![CI](https://github.com/MaxHu-xuan/task-state-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/MaxHu-xuan/task-state-guard/actions/workflows/ci.yml)
+
 TaskStateGuard is a small, standard-library-only task-state engine for agent runtimes that
 must survive process restarts without inventing success. It records lifecycle
 metadata, parent/child relationships, delivery state, and opaque SHA-256 payload
@@ -10,6 +16,13 @@ fingerprints in SQLite. It never needs the prompt or task body.
 This repository is a clean-room prototype. It was designed from a public problem
 statement and does not contain production databases, private fixtures, copied
 runtime code, or Git history from another project.
+
+It is a state ledger, not a scheduler, queue, worker, retry engine, transport, or
+proof that an external side effect occurred. The surrounding runtime remains
+responsible for executing work and recording real transport acknowledgements.
+
+中文定位：它只记录和校验状态，不负责执行、重试、调度或发送任务，也不会把超时、
+失联或未确认的外部副作用推测为成功。
 
 ## Why it exists
 
@@ -25,7 +38,7 @@ reconciles stale work after a restart with configurable grace periods.
 
 ## Properties
 
-- Python 3.11+ and no third-party runtime dependencies.
+- CPython 3.11 through 3.14 and no third-party runtime dependencies.
 - No network code and no telemetry.
 - Atomic SQLite writes with WAL, foreign keys, `busy_timeout`, and `quick_check`.
 - Exact schema fingerprinting, aggregate state/event diagnostics, and a guarded
@@ -65,7 +78,36 @@ internal work whose parent or surrounding flow owns the user-facing delivery.
 Delivery-required tasks cannot become `not_applicable`; internal tasks cannot be
 marked `delivered` or delivery `failed`.
 
-## Quick start
+## Install from a reviewed checkout
+
+TaskStateGuard supports CPython 3.11 through 3.14 and has no third-party runtime
+dependencies. From a cloned and reviewed source tree:
+
+Linux or macOS:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+task-state-guard --help
+task-state-guard --version
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\task-state-guard.exe --help
+.\.venv\Scripts\task-state-guard.exe --version
+```
+
+Installing from a checkout invokes the build backend and may download build-time
+requirements. Runtime operation itself is standard-library-only and performs no
+network access. Review the checkout and use your normal dependency controls
+before building in a sensitive environment.
+
+## Quick start from source
 
 Run directly from a checkout:
 
@@ -92,6 +134,35 @@ ledger.close_task(task.id, "succeeded", code="worker_completed")
 ledger.set_delivery(task.id, "delivered", code="transport_acknowledged")
 ```
 
+This synthetic end-to-end check is portable across the supported operating
+systems. On Windows, the temporary directory is pre-existing and the example
+explicitly acknowledges its externally managed ACL; this is a functional test,
+not evidence that the temporary directory has a production-quality DACL.
+
+```python
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from task_state_guard import Ledger, TaskStatus
+
+with TemporaryDirectory() as directory:
+    ledger = Ledger(
+        Path(directory) / "ledger.sqlite",
+        allow_external_acl=os.name == "nt",
+    )
+    task = ledger.create_task(timeout_seconds=30)
+    ledger.start_task(task.id)
+    finished = ledger.close_task(task.id, "succeeded", code="completed")
+    ledger.set_delivery(
+        task.id,
+        "delivered",
+        code="transport_acknowledged",
+    )
+    assert finished.status is TaskStatus.SUCCEEDED
+    assert ledger.doctor()["healthy"] is True
+```
+
 On Windows, Python's standard library cannot verify or install a private DACL
 equivalent to POSIX mode `0600`. TaskStateGuard therefore fails closed by
 default. First create the database directory with an ACL restricted to the
@@ -106,6 +177,18 @@ flag does not create, inspect, or certify a Windows ACL; it only records the
 caller's acknowledgement that the pre-existing directory is externally
 protected.
 
+## Platform contract
+
+| Host | Directory and file boundary | Required caller action |
+|---|---|---|
+| Linux | Local filesystem; private owner-controlled leaf; safe writable ancestors; database and sidecars tightened to `0600` | Use a dedicated service-account directory; do not use remote mounts or aliases |
+| macOS | Same POSIX checks as Linux; local SQLite-compatible filesystem required | Use a dedicated service-account directory; do not use aliases or shared writable paths |
+| Windows | Complete parent path must already exist; observable reparse points, symlinks, and hardlinks are rejected; DACL privacy cannot be verified by the standard library | Restrict the directory DACL externally, then pass `allow_external_acl=True` or `--allow-external-acl` |
+
+Windows acknowledgement does not emulate `chmod(0o600)`, inspect a DACL, or make
+a shared directory private. Linux and macOS mode enforcement does not make
+network filesystems supported.
+
 Reason codes use a fixed registry and must match the requested terminal state.
 For example, `worker_completed` belongs to task `succeeded`, `worker_failed` to
 task `failed`, and `transport_acknowledged` to delivery `delivered`. Free-form
@@ -114,11 +197,12 @@ database.
 
 ## CLI output and privacy contract
 
-For ordinary non-help invocations, the CLI writes one compact, key-sorted JSON
-line to standard output and nothing to standard error. Expected validation or
-state errors disclose only their exception class; unexpected exceptions become
-the fixed `InternalError` category. Rejected argument values, filesystem paths,
-and exception messages are not echoed. Exit status is deterministic:
+For ordinary state/database invocations other than `--help` and `--version`, the
+CLI writes one compact, key-sorted JSON line to standard output and nothing to
+standard error. Expected validation or state errors disclose only their
+exception class; unexpected exceptions become the fixed `InternalError`
+category. Rejected argument values, filesystem paths, and exception messages
+are not echoed. Exit status is deterministic:
 
 - `0`: the command succeeded, including a healthy `doctor` report;
 - `1`: `doctor` completed and found an inconsistent or unhealthy ledger;
@@ -198,6 +282,14 @@ The reconciler performs one atomic transaction:
 
 The report contains counts only, never task IDs.
 
+Reconciliation runs only when the caller invokes it; there is no background
+watcher. It never changes a queued task into success, never retries work, and
+never claims that a transport completed. A stale running task is closed as
+`timed_out`. A terminal delivery still lacking acknowledgement remains pending
+during the configured grace window, then becomes `failed` when delivery is
+required or `not_applicable` for internal work. This is durable bookkeeping, not
+exactly-once execution or exactly-once delivery.
+
 ## Doctor and migration
 
 `doctor` checks SQLite integrity, the exact schema fingerprint and version,
@@ -222,7 +314,14 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3.12 -m unittest discover -s test
 PYTHONDONTWRITEBYTECODE=1 python3.12 scripts/privacy_audit.py
 PYTHONDONTWRITEBYTECODE=1 python3.12 scripts/privacy_audit.py --self-test
 PYTHONDONTWRITEBYTECODE=1 python3.12 scripts/privacy_audit.py --sdist /path/to/extracted-sdist
+python3.12 scripts/install_smoke.py
+python3.12 scripts/artifact_smoke.py dist
 ```
+
+The last two commands run after installing the checkout or building wheel and
+source-distribution artifacts, respectively. `artifact_smoke.py` rejects unsafe
+archive members, audits the extracted source distribution, installs the wheel
+offline into a fresh virtual environment, and runs the installed CLI lifecycle.
 
 The synthetic suite covers restart grace, deadlines, cancellation, parent/child
 relationships and clocks, delivery reconciliation, concurrent idempotent closes,
@@ -243,12 +342,16 @@ path, or any additional generated directory, remains a hard finding.
 CI runs the suite on Ubuntu with Python 3.11 through 3.14 and on macOS and
 Windows with Python 3.11 and 3.14. The Windows jobs validate the explicit
 external-ACL boundary and portable state/locking behavior; they do not claim to
-audit or establish a Windows DACL.
+audit or establish a Windows DACL. A separate Python 3.14 package matrix builds,
+audits, installs, and smoke-tests wheel and source distributions independently
+on Linux, macOS, and Windows.
 
 ## Project status
 
 This pre-release clean-room implementation is licensed under the Apache License,
 Version 2.0; see `LICENSE`. See `PROVENANCE.md` for the clean-room and human
 review record, `CONTRIBUTING.md` for contribution guidance, `SECURITY.md` for
-reporting guidance, and `THREAT_MODEL.md` for the exact privacy boundary and
-non-goals.
+reporting guidance, `SUPPORT.md` for support boundaries, `CHANGELOG.md` for
+release notes, `CODE_OF_CONDUCT.md` for community standards,
+`RELEASING.md` for the maintainer release checklist, and `THREAT_MODEL.md`
+for the exact privacy boundary and non-goals.

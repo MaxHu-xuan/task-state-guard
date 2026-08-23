@@ -11,7 +11,20 @@ requires-python = ">=3.11"
 authors = [{ name = "TaskStateGuard contributors" }]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+keywords = [
+  "agent-runtime",
+  "crash-recovery",
+  "sqlite",
+  "state-machine",
+  "task-management",
+]
 classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
@@ -21,6 +34,14 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/MaxHu-xuan/task-state-guard"
+Documentation = "https://github.com/MaxHu-xuan/task-state-guard#readme"
+Repository = "https://github.com/MaxHu-xuan/task-state-guard"
+Issues = "https://github.com/MaxHu-xuan/task-state-guard/issues"
+Changelog = "https://github.com/MaxHu-xuan/task-state-guard/blob/main/CHANGELOG.md"
+Security = "https://github.com/MaxHu-xuan/task-state-guard/security/policy"
 
 [project.scripts]
 task-state-guard = "task_state_guard.cli:main"

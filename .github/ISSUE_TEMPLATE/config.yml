@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/MaxHu-xuan/task-state-guard/security/advisories/new
+    about: Report security-sensitive findings privately; never include production data.
+  - name: Support and scope
+    url: https://github.com/MaxHu-xuan/task-state-guard/blob/main/SUPPORT.md
+    about: Read the supported platforms, boundaries, and safe reporting guidance.

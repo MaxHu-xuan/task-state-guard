@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: task-state-guard-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
@@ -34,6 +38,7 @@ jobs:
           - os: windows-latest
             python-version: "3.14"
     env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUTF8: "1"
       PYTHONPATH: src
@@ -51,4 +56,40 @@ jobs:
       - name: Test privacy-audit canary
         run: python scripts/privacy_audit.py --self-test
       - name: Run synthetic unit tests
-        run: python -m unittest discover -s tests -q
+        run: python -W error::ResourceWarning -m unittest discover -s tests -q
+
+  package:
+    name: ${{ matrix.os }} / Python 3.14 package
+    needs: tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Audit the exact source tree
+        run: |
+          python scripts/privacy_audit.py
+          python scripts/privacy_audit.py --self-test
+      - name: Install the pinned build frontend
+        run: python -m pip install "build==1.3.0"
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Inspect, audit, install, and smoke-test artifacts
+        run: python scripts/artifact_smoke.py dist

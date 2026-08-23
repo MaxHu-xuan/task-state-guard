@@ -1,8 +1,14 @@
+include CHANGELOG.md
+include CODE_OF_CONDUCT.md
 include CONTRIBUTING.md
 include LICENSE
 include PROVENANCE.md
 include README.md
+include RELEASING.md
 include SECURITY.md
+include SUPPORT.md
 include THREAT_MODEL.md
+include scripts/artifact_smoke.py
+include scripts/install_smoke.py
 include scripts/privacy_audit.py
 recursive-include tests *.py

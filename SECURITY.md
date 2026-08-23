@@ -2,15 +2,17 @@
 
 ## Supported versions
 
-This prototype has not published a stable release. Security fixes currently
-target the latest revision only.
+This project is currently alpha software. Security fixes target the latest
+revision and the latest published `0.1.x` release when one exists. Older commits
+and unpublished development snapshots are not supported.
 
 ## Reporting a vulnerability
 
+Use [GitHub private vulnerability reporting](https://github.com/MaxHu-xuan/task-state-guard/security/advisories/new).
 Do not open a public issue containing a database, payload fingerprint, filesystem
-path, task identifier, or reproduction derived from private workloads. Before a
-public repository is launched, configure GitHub private vulnerability reporting
-and replace this section with its canonical contact path.
+path, task identifier, or reproduction derived from private workloads. If the
+private reporting form is unavailable, open only a value-free public issue asking
+the maintainer to enable it; do not include vulnerability details there.
 
 A useful private report should include:
 

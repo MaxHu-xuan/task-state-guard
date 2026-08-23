@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible TaskStateGuard defect using synthetic data only.
+title: "[Bug] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never attach a production database or include private task content, identifiers, fingerprints, paths, credentials, or logs. Use generated UUIDs and synthetic values.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safe reproduction
+      options:
+        - label: I confirm this report and every attachment contain synthetic, non-confidential data only.
+          required: true
+        - label: I checked that this is not a security vulnerability requiring private reporting.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: TaskStateGuard version or commit
+      placeholder: 0.1.0 or a short public commit identifier
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: CPython 3.12
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Include only the smallest code or commands needed to reproduce the behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Summarize the outcome without pasting private paths, values, or database content.
+    validations:
+      required: true

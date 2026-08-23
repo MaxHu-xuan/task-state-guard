@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import ast
 import collections
+import errno
 import hashlib
 import json
 import os
@@ -96,14 +97,20 @@ TEXT_SUFFIXES = frozenset(
 )
 TEXT_NAMES = frozenset((".gitignore", "LICENSE", "MANIFEST.in"))
 REQUIRED_FILES = (
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "LICENSE",
     "MANIFEST.in",
     "PROVENANCE.md",
     "README.md",
+    "RELEASING.md",
     "SECURITY.md",
+    "SUPPORT.md",
     "THREAT_MODEL.md",
     "pyproject.toml",
+    "scripts/artifact_smoke.py",
+    "scripts/install_smoke.py",
     "scripts/privacy_audit.py",
     "src/task_state_guard/__init__.py",
     "src/task_state_guard/__main__.py",
@@ -112,6 +119,16 @@ REQUIRED_FILES = (
     "src/task_state_guard/reconcile.py",
     "src/task_state_guard/store.py",
     "tests/test_task_state_guard.py",
+)
+REPOSITORY_REQUIRED_FILES = (
+    ".github/CODEOWNERS",
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ".github/ISSUE_TEMPLATE/config.yml",
+    ".github/ISSUE_TEMPLATE/feature_request.yml",
+    ".github/dependabot.yml",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/workflows/ci.yml",
+    ".gitignore",
 )
 NETWORK_OR_TELEMETRY_MODULES = frozenset(
     (
@@ -203,8 +220,24 @@ def _files(
     *,
     sdist: bool = False,
 ) -> Iterator[Path]:
+    def on_walk_error(error: OSError) -> None:
+        raw_path = getattr(error, "filename", None)
+        relative = "."
+        if isinstance(raw_path, str):
+            try:
+                candidate = Path(raw_path)
+                candidate_relative = candidate.relative_to(root)
+                if all(
+                    part not in ("", ".", "..")
+                    for part in candidate_relative.parts
+                ):
+                    relative = candidate_relative.as_posix()
+            except (OSError, ValueError):
+                pass
+        findings[(relative, "scan.directory_error")] += 1
+
     for directory, names, files in os.walk(
-        str(root), topdown=True, followlinks=False
+        str(root), topdown=True, onerror=on_walk_error, followlinks=False
     ):
         base = Path(directory)
         kept = []
@@ -227,10 +260,19 @@ def _files(
             yield base / name
 
 
-def _metadata_checks(root: Path, findings: Counter[Tuple[str, str]]) -> None:
+def _metadata_checks(
+    root: Path,
+    findings: Counter[Tuple[str, str]],
+    *,
+    sdist: bool,
+) -> None:
     for relative in REQUIRED_FILES:
         if not (root / relative).is_file():
             findings[(relative, "release.required_file_missing")] += 1
+    if not sdist:
+        for relative in REPOSITORY_REQUIRED_FILES:
+            if not (root / relative).is_file():
+                findings[(relative, "release.required_file_missing")] += 1
 
     license_path = root / "LICENSE"
     try:
@@ -266,6 +308,23 @@ def _metadata_checks(root: Path, findings: Counter[Tuple[str, str]]) -> None:
             r"(?m)^dependencies\s*=\s*\[\s*\]\s*$",
             "metadata.runtime_dependencies_present",
         ),
+        (r"(?m)^keywords\s*=\s*\[", "metadata.keywords_missing"),
+        (
+            r"(?m)^Repository\s*=\s*['\"]https://github\.com/MaxHu-xuan/task-state-guard['\"]\s*$",
+            "metadata.repository_url_missing",
+        ),
+        (
+            r"Operating System :: Microsoft :: Windows",
+            "metadata.windows_classifier_missing",
+        ),
+        (
+            r"Operating System :: MacOS",
+            "metadata.macos_classifier_missing",
+        ),
+        (
+            r"Operating System :: POSIX :: Linux",
+            "metadata.linux_classifier_missing",
+        ),
         (r"setuptools>=77\.0\.3", "metadata.build_backend_too_old"),
         (
             r'''(?m)^package-dir\s*=\s*\{\s*(?:""|'')\s*=\s*['\"]src['\"]\s*\}\s*$''',
@@ -279,6 +338,8 @@ def _metadata_checks(root: Path, findings: Counter[Tuple[str, str]]) -> None:
     for pattern, code in checks:
         if not re.search(pattern, metadata):
             findings[("pyproject.toml", code)] += 1
+    if "License :: OSI Approved :: Apache Software License" in metadata:
+        findings[("pyproject.toml", "metadata.pep639_classifier_conflict")] += 1
 
     try:
         manifest_lines = set(
@@ -287,12 +348,18 @@ def _metadata_checks(root: Path, findings: Counter[Tuple[str, str]]) -> None:
     except (OSError, UnicodeError):
         return
     expected_manifest_lines = {
+        "include CHANGELOG.md",
+        "include CODE_OF_CONDUCT.md",
         "include CONTRIBUTING.md",
         "include LICENSE",
         "include PROVENANCE.md",
         "include README.md",
+        "include RELEASING.md",
         "include SECURITY.md",
+        "include SUPPORT.md",
         "include THREAT_MODEL.md",
+        "include scripts/artifact_smoke.py",
+        "include scripts/install_smoke.py",
         "include scripts/privacy_audit.py",
         "recursive-include tests *.py",
     }
@@ -372,7 +439,7 @@ def audit(
         return _report(findings, files_scanned)
 
     if validate_release:
-        _metadata_checks(root, findings)
+        _metadata_checks(root, findings, sdist=sdist)
     if sdist:
         expected_egg_info = root / SDIST_EGG_INFO_DIRECTORY
         try:
@@ -445,7 +512,7 @@ def self_test() -> bool:
             "/" + "Users" + "/sample-user/notes",
             "/" + "root" + "/private/notes",
             "person" + "@" + "example.invalid",
-            "155" + "0000" + "1234",
+            "139" + "\u0660" * 4 + "\u0661" * 4,
             "192" + ".0.2.1",
             "s" + "k-" + "A" * 24,
             "-----BEGIN " + "PRIVATE KEY-----",
@@ -537,6 +604,33 @@ def self_test() -> bool:
             (row["path"], row["code"]) for row in extra_report["findings"]
         }
 
+        walk_root = temporary_root / "walk-root"
+        walk_root.mkdir()
+        walk_root = walk_root.resolve(strict=True)
+        original_walk = os.walk
+
+        def denied_walk(*args, **kwargs):
+            del args
+            onerror = kwargs.get("onerror")
+            if onerror is not None:
+                onerror(
+                    OSError(
+                        errno.EACCES,
+                        "synthetic directory error",
+                        str(walk_root / "blocked"),
+                    )
+                )
+            return iter(())
+
+        os.walk = denied_walk
+        try:
+            walk_report = audit(walk_root, validate_release=False)
+        finally:
+            os.walk = original_walk
+        walk_findings = {
+            (row["path"], row["code"]) for row in walk_report["findings"]
+        }
+
         return (
             canary_checks_ok
             and not ordinary_report["ok"]
@@ -567,6 +661,8 @@ def self_test() -> bool:
                 "artifact.generated_directory",
             )
             in extra_findings
+            and not walk_report["ok"]
+            and ("blocked", "scan.directory_error") in walk_findings
         )
 
 
