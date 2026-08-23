@@ -457,7 +457,8 @@ identity. UNC paths, mapped network drives, remote mounts, and filesystems with
 unreliable inode or hardlink reporting are unsupported. TaskStateGuard cannot
 reliably identify every mapped or mounted remote filesystem, so deployment on a
 local disk is an operator requirement. It assumes processes with the same OS
-user identity are trusted; see `THREAT_MODEL.md` for the remaining limits.
+user identity are trusted; see [THREAT_MODEL.md](THREAT_MODEL.md) for the
+remaining limits.
 
 ### Restart reconciliation
 
@@ -606,9 +607,11 @@ supported.
 ## Project status
 
 This pre-release clean-room implementation is licensed under the Apache License,
-Version 2.0; see `LICENSE`. See `PROVENANCE.md` for the clean-room and human
-review record, `CONTRIBUTING.md` for contribution guidance, `SECURITY.md` for
-reporting guidance, `SUPPORT.md` for support boundaries, `CHANGELOG.md` for
-release notes, `CODE_OF_CONDUCT.md` for community standards,
-`RELEASING.md` for the maintainer release checklist, and `THREAT_MODEL.md`
-for the exact privacy boundary and non-goals.
+Version 2.0; see [LICENSE](LICENSE). See [PROVENANCE.md](PROVENANCE.md) for the
+clean-room and human review record, [CONTRIBUTING.md](CONTRIBUTING.md) for
+contribution guidance, [SECURITY.md](SECURITY.md) for reporting guidance,
+[SUPPORT.md](SUPPORT.md) for support boundaries, [CHANGELOG.md](CHANGELOG.md)
+for release notes, [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community
+standards, [RELEASING.md](RELEASING.md) for the maintainer release checklist,
+and [THREAT_MODEL.md](THREAT_MODEL.md) for the exact privacy boundary and
+non-goals.

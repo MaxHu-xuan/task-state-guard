@@ -4,7 +4,12 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import configparser
+import csv
+import hashlib
+import io
 import json
 import os
 import stat
@@ -23,6 +28,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_NAME = "task-state-guard"
 EXPECTED_VERSION = "0.1.0"
+EXPECTED_DIST_INFO = "task_state_guard-0.1.0.dist-info"
 MAX_MEMBER_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 EXPECTED_SINGLETON_METADATA = {
@@ -36,6 +42,40 @@ EXPECTED_REPOSITORY_URL = (
 )
 EXPECTED_CONSOLE_ENTRYPOINTS = {
     "task-state-guard": "task_state_guard.cli:main",
+}
+EXPECTED_WHEEL_DESCRIPTOR = {
+    "Wheel-Version": "1.0",
+    "Root-Is-Purelib": "true",
+    "Tag": "py3-none-any",
+}
+ALLOWED_WHEEL_DESCRIPTOR_HEADERS = frozenset(
+    name.casefold()
+    for name in (*EXPECTED_WHEEL_DESCRIPTOR, "Generator")
+)
+EXPECTED_TOP_LEVEL = "task_state_guard\n"
+EXPECTED_PACKAGE_FILES = frozenset(
+    (
+        "task_state_guard/__init__.py",
+        "task_state_guard/__main__.py",
+        "task_state_guard/cli.py",
+        "task_state_guard/model.py",
+        "task_state_guard/reconcile.py",
+        "task_state_guard/store.py",
+    )
+)
+EXPECTED_WHEEL_FILES = EXPECTED_PACKAGE_FILES | frozenset(
+    (
+        EXPECTED_DIST_INFO + "/licenses/LICENSE",
+        EXPECTED_DIST_INFO + "/METADATA",
+        EXPECTED_DIST_INFO + "/WHEEL",
+        EXPECTED_DIST_INFO + "/entry_points.txt",
+        EXPECTED_DIST_INFO + "/top_level.txt",
+        EXPECTED_DIST_INFO + "/RECORD",
+    )
+)
+WHEEL_TO_SDIST_SOURCE = {
+    **{name: "src/" + name for name in EXPECTED_PACKAGE_FILES},
+    EXPECTED_DIST_INFO + "/licenses/LICENSE": "LICENSE",
 }
 
 
@@ -99,6 +139,51 @@ def _verify_entrypoints(entrypoints: str) -> None:
         raise ArtifactFailure("wheel_entrypoint_mismatch")
 
 
+def _verify_wheel_descriptor(descriptor: str) -> None:
+    """Validate installer-relevant WHEEL fields without pinning Generator."""
+
+    descriptor = _normalize_newlines(descriptor, "wheel_descriptor_mismatch")
+    try:
+        message = Parser(policy=policy.default).parsestr(descriptor)
+    except (TypeError, ValueError):
+        raise ArtifactFailure("wheel_descriptor_mismatch") from None
+    payload = message.get_payload()
+    header_names = [name.casefold() for name in message.keys()]
+    if (
+        message.defects
+        or message.is_multipart()
+        or payload not in (None, "")
+        or any(
+            name not in ALLOWED_WHEEL_DESCRIPTOR_HEADERS
+            for name in header_names
+        )
+    ):
+        raise ArtifactFailure("wheel_descriptor_mismatch")
+    for name, expected in EXPECTED_WHEEL_DESCRIPTOR.items():
+        values = message.get_all(name, [])
+        if len(values) != 1 or str(values[0]) != expected:
+            raise ArtifactFailure("wheel_descriptor_mismatch")
+    generators = [str(value) for value in message.get_all("Generator", [])]
+    if len(generators) > 1:
+        raise ArtifactFailure("wheel_descriptor_mismatch")
+    if generators:
+        generator = generators[0]
+        if (
+            not 1 <= len(generator) <= 200
+            or generator != generator.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in generator)
+        ):
+            raise ArtifactFailure("wheel_descriptor_mismatch")
+
+
+def _verify_top_level(top_level: str) -> None:
+    """Require the wheel to expose only the expected import package."""
+
+    normalized = _normalize_newlines(top_level, "wheel_top_level_mismatch")
+    if normalized != EXPECTED_TOP_LEVEL:
+        raise ArtifactFailure("wheel_top_level_mismatch")
+
+
 def _parts(name: str) -> Tuple[str, ...]:
     if (
         not isinstance(name, str)
@@ -106,6 +191,9 @@ def _parts(name: str) -> Tuple[str, ...]:
         or "\x00" in name
         or "\\" in name
     ):
+        raise ArtifactFailure("unsafe_archive_member")
+    raw_parts = name.split("/")
+    if any(part in ("", ".", "..") or ":" in part for part in raw_parts):
         raise ArtifactFailure("unsafe_archive_member")
     path = PurePosixPath(name)
     if path.is_absolute() or any(
@@ -127,6 +215,60 @@ def _artifacts(directory: Path) -> Tuple[Path, Path]:
     return wheels[0], sdists[0]
 
 
+def _verify_record(
+    archive: zipfile.ZipFile,
+    file_names: set[str],
+    record_name: str,
+) -> None:
+    """Verify the wheel RECORD as a strict SHA-256 closed set."""
+
+    try:
+        raw_record = archive.read(record_name).decode("utf-8", "strict")
+        rows = list(csv.reader(io.StringIO(raw_record, newline=""), strict=True))
+    except (csv.Error, KeyError, UnicodeError):
+        raise ArtifactFailure("wheel_record_mismatch") from None
+
+    recorded_names = set()
+    for row in rows:
+        if len(row) != 3:
+            raise ArtifactFailure("wheel_record_mismatch")
+        name, encoded_digest, encoded_size = row
+        _parts(name)
+        if name in recorded_names:
+            raise ArtifactFailure("wheel_record_mismatch")
+        recorded_names.add(name)
+        if name == record_name:
+            if encoded_digest or encoded_size:
+                raise ArtifactFailure("wheel_record_mismatch")
+            continue
+        if not encoded_digest.startswith("sha256="):
+            raise ArtifactFailure("wheel_record_mismatch")
+        digest_text = encoded_digest.partition("=")[2]
+        if not digest_text or "=" in digest_text:
+            raise ArtifactFailure("wheel_record_mismatch")
+        try:
+            digest = base64.b64decode(
+                digest_text + "=" * (-len(digest_text) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+            size = int(encoded_size)
+            payload = archive.read(name)
+        except (KeyError, ValueError, binascii.Error):
+            raise ArtifactFailure("wheel_record_mismatch") from None
+        if (
+            base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            != digest_text
+            or digest != hashlib.sha256(payload).digest()
+            or size < 0
+            or encoded_size != str(size)
+            or size != len(payload)
+        ):
+            raise ArtifactFailure("wheel_record_mismatch")
+    if recorded_names != file_names:
+        raise ArtifactFailure("wheel_record_mismatch")
+
+
 def _verify_wheel(wheel: Path) -> int:
     try:
         with zipfile.ZipFile(wheel) as archive:
@@ -134,13 +276,20 @@ def _verify_wheel(wheel: Path) -> int:
             if not infos:
                 raise ArtifactFailure("empty_wheel")
             names = set()
+            file_names = set()
             total_bytes = 0
             for info in infos:
-                parts = _parts(info.filename)
-                normalized = info.filename.rstrip("/")
+                normalized = (
+                    info.filename[:-1]
+                    if info.is_dir() and info.filename.endswith("/")
+                    else info.filename
+                )
+                parts = _parts(normalized)
                 if normalized in names:
                     raise ArtifactFailure("duplicate_wheel_member")
                 names.add(normalized)
+                if not info.is_dir():
+                    file_names.add(normalized)
                 mode = (info.external_attr >> 16) & 0xFFFF
                 file_type = stat.S_IFMT(mode)
                 if (
@@ -165,10 +314,24 @@ def _verify_wheel(wheel: Path) -> int:
             entrypoint_names = sorted(
                 name for name in names if name.endswith(".dist-info/entry_points.txt")
             )
+            record_names = sorted(
+                name for name in names if name.endswith(".dist-info/RECORD")
+            )
+            directory_names = names - file_names
+            if file_names != EXPECTED_WHEEL_FILES or any(
+                not any(
+                    expected.startswith(directory + "/")
+                    for expected in EXPECTED_WHEEL_FILES
+                )
+                for directory in directory_names
+            ):
+                raise ArtifactFailure("unexpected_wheel_member")
             if (
-                "task_state_guard/__init__.py" not in names
-                or len(metadata_names) != 1
+                len(metadata_names) != 1
                 or len(entrypoint_names) != 1
+                or record_names != [EXPECTED_DIST_INFO + "/RECORD"]
+                or metadata_names != [EXPECTED_DIST_INFO + "/METADATA"]
+                or entrypoint_names != [EXPECTED_DIST_INFO + "/entry_points.txt"]
             ):
                 raise ArtifactFailure("wheel_content_missing")
 
@@ -176,9 +339,32 @@ def _verify_wheel(wheel: Path) -> int:
             _verify_core_metadata(metadata)
             entrypoints = archive.read(entrypoint_names[0]).decode("utf-8", "strict")
             _verify_entrypoints(entrypoints)
+            descriptor = archive.read(EXPECTED_DIST_INFO + "/WHEEL").decode(
+                "utf-8", "strict"
+            )
+            _verify_wheel_descriptor(descriptor)
+            top_level = archive.read(
+                EXPECTED_DIST_INFO + "/top_level.txt"
+            ).decode("utf-8", "strict")
+            _verify_top_level(top_level)
+            _verify_record(archive, file_names, record_names[0])
             return sum(not info.is_dir() for info in infos)
     except (OSError, UnicodeError, zipfile.BadZipFile):
         raise ArtifactFailure("wheel_read_failed") from None
+
+
+def _verify_source_consistency(wheel: Path, sdist_root: Path) -> None:
+    """Require wheel runtime sources and license to equal the audited sdist."""
+
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            for wheel_name, sdist_name in WHEEL_TO_SDIST_SOURCE.items():
+                if archive.read(wheel_name) != (sdist_root / sdist_name).read_bytes():
+                    raise ArtifactFailure("artifact_source_mismatch")
+    except ArtifactFailure:
+        raise
+    except (KeyError, OSError, zipfile.BadZipFile):
+        raise ArtifactFailure("artifact_source_mismatch") from None
 
 
 def _extract_sdist(sdist: Path, destination: Path) -> Tuple[Path, int]:
@@ -191,7 +377,12 @@ def _extract_sdist(sdist: Path, destination: Path) -> Tuple[Path, int]:
             file_count = 0
             total_bytes = 0
             for member in members:
-                parts = _parts(member.name.rstrip("/"))
+                normalized = (
+                    member.name[:-1]
+                    if member.isdir() and member.name.endswith("/")
+                    else member.name
+                )
+                parts = _parts(normalized)
                 roots.add(parts[0])
                 if not (member.isdir() or member.isreg()):
                     raise ArtifactFailure("unsafe_sdist_member")
@@ -318,6 +509,7 @@ def smoke(directory: Path) -> Dict[str, object]:
             sdist, temporary_root / "source"
         )
         _audit_sdist(source_root)
+        _verify_source_consistency(wheel, source_root)
         _install_wheel(wheel, temporary_root / "environment")
     return {
         "artifact_count": 2,

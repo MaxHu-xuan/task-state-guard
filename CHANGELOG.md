@@ -29,6 +29,11 @@ All notable changes to TaskStateGuard are documented here. The format follows
 - Parse wheel core metadata as structured RFC-style headers so valid Windows
   CRLF output is accepted while missing, duplicated, or body-only fields still
   fail the artifact gate.
+- Require an exact wheel member set, a canonical closed-set SHA-256 `RECORD`,
+  and byte-for-byte agreement between wheel runtime sources, its license, and
+  the audited source distribution.
+- Validate the installer-facing `WHEEL` fields and `top_level.txt` so a rebuilt
+  valid `RECORD` cannot conceal package-semantic changes.
 
 ### Documentation
 
