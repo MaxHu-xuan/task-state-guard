@@ -8,6 +8,7 @@ include RELEASING.md
 include SECURITY.md
 include SUPPORT.md
 include THREAT_MODEL.md
+include scripts/canonicalize_sdist.py
 include scripts/artifact_smoke.py
 include scripts/install_smoke.py
 include scripts/privacy_audit.py

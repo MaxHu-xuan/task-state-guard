@@ -26,6 +26,8 @@ All notable changes to TaskStateGuard are documented here. The format follows
   points, non-regular files, and multiple hardlinks.
 - Cross-platform tests, privacy auditing, and isolated package-install smoke
   checks.
+- A cross-platform canonical source-archive builder that strips build-account
+  ownership metadata, rejects unsafe members, and verifies unchanged content.
 
 ### Fixed
 
@@ -40,6 +42,8 @@ All notable changes to TaskStateGuard are documented here. The format follows
   the audited source distribution.
 - Validate the installer-facing `WHEEL` fields and `top_level.txt` so a rebuilt
   valid `RECORD` cannot conceal package-semantic changes.
+- Fix release timestamps to a public project epoch so wheel metadata does not
+  retain local checkout times.
 
 ### Documentation
 
