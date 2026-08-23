@@ -1,54 +1,227 @@
-# TaskStateGuard（任务状态守护）
+# TaskStateGuard
 
-Crash-safe task and delivery state without storing task bodies.
-
-一个不保存任务正文、能在进程重启后如实收敛任务与投递状态的 SQLite 状态机。
+任务状态守护
 
 [![CI](https://github.com/MaxHu-xuan/task-state-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/MaxHu-xuan/task-state-guard/actions/workflows/ci.yml)
 
-TaskStateGuard is a small, standard-library-only task-state engine for agent runtimes that
-must survive process restarts without inventing success. It records lifecycle
-metadata, parent/child relationships, delivery state, and opaque SHA-256 payload
-fingerprints in SQLite. It never needs the prompt or task body.
+[中文介绍](#中文介绍) · [中文常见问题](#中文常见问题) · [English overview](#english-overview) · [Technical reference](#technical-reference) · [English FAQ](#english-faq)
 
-中文简介：为智能体任务提供崩溃安全的状态记录与重启收尾，区分“任务是否结束”和“结果是否交付”，且不保存提示词或任务正文。
+## 中文介绍
 
-This repository is a clean-room prototype. It was designed from a public problem
-statement and does not contain production databases, private fixtures, copied
-runtime code, or Git history from another project.
+TaskStateGuard 是一个面向 AI 智能体和后台 worker 的重启安全任务状态账本。它把任务
+执行状态与结果投递状态分别写入本地 SQLite，在进程崩溃或重启后收敛卡住的状态，
+同时不保存提示词、消息正文或任务正文。
 
-It is a state ledger, not a scheduler, queue, worker, retry engine, transport, or
-proof that an external side effect occurred. The surrounding runtime remains
-responsible for executing work and recording real transport acknowledgements.
+### 适用场景
 
-中文定位：它只记录和校验状态，不负责执行、重试、调度或发送任务，也不会把超时、
-失联或未确认的外部副作用推测为成功。
-
-## What TaskStateGuard solves / 它解决什么
-
-TaskStateGuard answers one narrow operational question: after an AI agent or
-worker process restarts, which tasks are still active, which have reached a real
-terminal state, and which results still lack a transport acknowledgement? It
-persists bounded state metadata in SQLite and reconciles stale records without
-guessing that work or delivery succeeded.
-
-一句话说明：它是面向 AI 智能体与后台 worker 的“重启安全任务状态账本”，用于收敛
-SQLite 中的卡死任务和待投递状态；它不会恢复任务正文，也不会伪造成功或已送达。
-
-| Common question / 常见需求 | TaskStateGuard's answer / 能力边界 |
+| 场景 | 使用后得到的结果 |
 |---|---|
-| How do I reconcile stale agent tasks after a process restart? / 进程重启后如何收敛卡死任务？ | Call `reconcile_restart()` or the `reconcile` CLI with explicit active and delivery grace periods. |
-| How do I track task completion separately from result delivery? / 如何区分任务完成和结果送达？ | Independent task and delivery state machines preserve both facts. |
-| How do I audit a SQLite task ledger without exposing task data? / 如何安全诊断 SQLite 任务账本？ | `doctor` returns aggregate counts and health signals, never task IDs or payload fingerprints. |
-| Can the same state ledger run on Linux, macOS, and Windows? / 是否跨平台？ | Yes, with POSIX mode enforcement on Linux/macOS and an explicit externally managed ACL boundary on Windows. |
-| Does restart recovery require storing prompts or task bodies? / 是否需要保存提示词或正文？ | No. The schema has no plaintext payload field; an optional validated SHA-256 fingerprint is the only payload-derived value. |
+| 智能体或 worker 重启，部分任务仍显示运行中 | 超过截止时间或活跃宽限期的运行中任务会如实转为 `timed_out`，新鲜任务继续保留 |
+| 任务已经结束，但用户侧没有真实投递回执 | 投递状态在宽限期内保持 `pending`，到期后按任务类型转为 `failed` 或 `not_applicable` |
+| 运维需要判断 SQLite 任务账本是否一致 | `doctor` 返回完整性、状态和事件聚合计数，不输出任务 ID 或负载指纹 |
+| 同一套任务状态逻辑需要运行在 Linux、macOS 和 Windows | Linux 和 macOS 使用文件权限保护；Windows 使用调用方预先配置的私有 DACL 边界 |
 
-Use TaskStateGuard when a trusted Python runtime already executes work but needs
-a small, local, restart-safe source of truth for task lifecycle and delivery
-acknowledgement. Do not use it as a distributed queue, workflow orchestrator,
-process supervisor, retry service, transport, or exactly-once guarantee.
+### 三步使用
 
-## Why it exists
+#### 1. 从已审查的源码安装
+
+Linux 或 macOS：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+```
+
+Windows PowerShell：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+```
+
+#### 2. 只记录真实发生的状态变化
+
+```python
+import os
+
+from task_state_guard import Ledger
+
+ledger = Ledger(
+    "task-state-guard.sqlite",
+    allow_external_acl=os.name == "nt",
+)
+task = ledger.create_task(timeout_seconds=900)
+ledger.start_task(task.id)
+ledger.close_task(task.id, "succeeded", code="worker_completed")
+ledger.set_delivery(task.id, "delivered", code="transport_acknowledged")
+```
+
+#### 3. 重启后执行收敛和诊断
+
+```bash
+task-state-guard --db ./task-state-guard.sqlite reconcile \
+  --active-grace-seconds 600 \
+  --delivery-grace-seconds 600
+task-state-guard --db ./task-state-guard.sqlite doctor
+```
+
+Windows 使用前必须由管理员或部署系统创建仅服务账户可访问的目录，并在全局参数位置
+加入 `--allow-external-acl`。该参数只确认外部 ACL 已配置，不会创建或认证 DACL。
+
+### 使用结果
+
+- 重启后的 stale task reconciliation 有明确宽限期，不会把失联任务猜成成功。
+- 任务完成与结果送达分别记录，未收到 transport acknowledgement 就不会标记已投递。
+- SQLite WAL、事务、外键、schema fingerprint 和 `quick_check` 共同保护账本一致性。
+- 诊断输出以计数为主；数据库没有提示词、消息正文或自由文本错误字段。
+- 运行时代码只使用 Python 标准库，不包含网络请求或遥测。
+
+### 使用限制
+
+- 它不是任务队列、调度器、worker、重试服务、工作流引擎或消息传输层。
+- 它不会恢复中断的计算，也不保证 exactly-once execution 或 exactly-once delivery。
+- 外部系统必须执行真实工作，并在收到真实投递回执后更新 delivery state。
+- 数据库必须位于支持稳定文件身份和 SQLite 锁的本地文件系统；不支持网络盘和映射盘。
+- Windows 的 DACL 由外部系统负责，Python 标准库无法验证其等价于 POSIX `0600`。
+
+详细状态机、存储边界、诊断规则和测试矩阵见后面的英文技术参考。
+
+## 中文常见问题
+
+### TaskStateGuard 能续跑中断的智能体任务吗？
+
+不能。它保存并收敛任务生命周期元数据，不会保存计算检查点或恢复计算。运行中任务只会
+在超过截止时间或配置的宽限期后转为 `timed_out`，是否创建新的重试任务由外部运行时
+决定。
+
+### 它能保证恰好一次执行或恰好一次投递吗？
+
+不能。重复写入同一个终态是幂等的，冲突终态会被拒绝，但它无法观察外部副作用。
+只有传输系统记录了真实回执后，调用方才能把 delivery state 更新为 `delivered`。
+
+### 它是 Python 任务队列、调度器或工作流引擎吗？
+
+不是。TaskStateGuard 只保存本地 SQLite 状态账本，不负责入队、调度、执行、取消、
+重试或发送任务。它可以与智能体运行时、worker pool 或工作流系统配合使用，但当前
+仓库不提供框架专用适配器。
+
+### 为什么任务状态和投递状态要分开？
+
+任务可能已经成功结束，但结果仍在等待投递；内部子任务也可能不需要直接面向用户的
+投递。拆分两套状态机可以避免把任务完成误判为结果已经送达。
+
+### 它会保存提示词、消息或模型输出吗？
+
+不会。数据库和 CLI 都没有这些字段。可选的 SHA-256 payload fingerprint 属于可关联的
+假名化元数据，并不是匿名内容；如果低熵输入可能被离线猜测，应省略该值或在外部使用
+带密钥的指纹方案。
+
+### Windows、macOS 和 Linux 分别有什么要求？
+
+所有平台都必须使用支持 SQLite 锁的本地文件系统。Linux 和 macOS 使用所有者与权限
+检查，并把数据库文件设为 `0600`。Windows 需要预先创建带私有 DACL 的服务账户目录，
+再传入 `allow_external_acl=True`；Python 标准库无法验证该 DACL。网络盘和映射盘不受
+支持。
+
+## English Overview
+
+TaskStateGuard is a restart-safe SQLite task-state and delivery ledger for AI
+agent runtimes and background workers. It reconciles stale state after a crash
+or process restart without storing prompts, messages, or task bodies and without
+inventing successful work or delivery.
+
+### Use cases
+
+| Situation | Outcome |
+|---|---|
+| An agent or worker restarts while tasks still look active | Running tasks past their deadline or active grace become `timed_out`; fresh work is retained |
+| Work is terminal but no real delivery acknowledgement exists | Delivery stays `pending` during grace, then becomes `failed` or `not_applicable` according to task type |
+| An operator needs to validate a SQLite task ledger | `doctor` reports aggregate integrity, state, and event counts without task IDs or payload fingerprints |
+| One state model must run on Linux, macOS, and Windows | POSIX modes protect Linux/macOS files; Windows uses an explicit externally managed private DACL boundary |
+
+### Three-step setup
+
+#### 1. Install from a reviewed checkout
+
+Linux or macOS:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+```
+
+Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+```
+
+#### 2. Record real state transitions
+
+```python
+import os
+
+from task_state_guard import Ledger
+
+ledger = Ledger(
+    "task-state-guard.sqlite",
+    allow_external_acl=os.name == "nt",
+)
+task = ledger.create_task(timeout_seconds=900)
+ledger.start_task(task.id)
+ledger.close_task(task.id, "succeeded", code="worker_completed")
+ledger.set_delivery(task.id, "delivered", code="transport_acknowledged")
+```
+
+#### 3. Reconcile and diagnose after restart
+
+```bash
+task-state-guard --db ./task-state-guard.sqlite reconcile \
+  --active-grace-seconds 600 \
+  --delivery-grace-seconds 600
+task-state-guard --db ./task-state-guard.sqlite doctor
+```
+
+On Windows, first create a service-account directory protected by a private
+DACL, then place `--allow-external-acl` with the global CLI arguments. The flag
+acknowledges an external boundary; it does not create or certify the DACL.
+
+The Python API exposes `Ledger`, `ReconcilePolicy`, and `reconcile_restart` for
+embedded runtimes. The CLI provides the same lifecycle, reconciliation, and
+counts-only diagnostic operations for process-based integrations.
+
+### Outcomes
+
+- Restart-safe agent recovery closes stale running state after explicit grace.
+- Task completion and result delivery remain separate facts.
+- Atomic SQLite writes, WAL, foreign keys, schema fingerprinting, and
+  `quick_check` protect local ledger consistency.
+- The schema has no plaintext prompt, message, task body, path, or free-form
+  exception field.
+- Runtime code uses only the Python standard library and has no network or
+  telemetry path.
+
+### Limits
+
+- TaskStateGuard is not a queue, scheduler, worker, retry service, workflow
+  engine, process supervisor, or transport.
+- It does not resume computation or guarantee exactly-once execution or
+  exactly-once delivery.
+- The surrounding runtime must perform work and record a real transport
+  acknowledgement before delivery becomes `delivered`.
+- Use a local SQLite-compatible filesystem. Network and mapped drives are not
+  supported.
+- Windows privacy depends on a caller-managed DACL that the Python standard
+  library cannot inspect or certify.
+
+## Technical reference
+
+The remaining technical reference is written in English.
+
+### Why it exists
 
 Agent runtimes often have two different truths:
 
@@ -60,7 +233,7 @@ Conflating them produces misleading states such as a timed-out task that remains
 user-facing delivery. TaskStateGuard models both state machines explicitly and
 reconciles stale work after a restart with configurable grace periods.
 
-## Properties
+### Properties
 
 - CPython 3.11 through 3.14 and no third-party runtime dependencies.
 - No network code and no telemetry.
@@ -79,7 +252,7 @@ reconciles stale work after a restart with configurable grace periods.
 - Value-free JSON CLI errors: rejected arguments, paths, and exceptions are not
   echoed.
 
-## State model
+### State model
 
 Task states:
 
@@ -102,7 +275,7 @@ internal work whose parent or surrounding flow owns the user-facing delivery.
 Delivery-required tasks cannot become `not_applicable`; internal tasks cannot be
 marked `delivered` or delivery `failed`.
 
-## Install from a reviewed checkout
+### Detailed installation
 
 TaskStateGuard supports CPython 3.11 through 3.14 and has no third-party runtime
 dependencies. From a cloned and reviewed source tree:
@@ -131,7 +304,7 @@ requirements. Runtime operation itself is standard-library-only and performs no
 network access. Review the checkout and use your normal dependency controls
 before building in a sensitive environment.
 
-## Quick start from source
+### Source and Python examples
 
 Run directly from a checkout:
 
@@ -201,7 +374,7 @@ flag does not create, inspect, or certify a Windows ACL; it only records the
 caller's acknowledgement that the pre-existing directory is externally
 protected.
 
-## Platform contract
+### Platform contract
 
 | Host | Directory and file boundary | Required caller action |
 |---|---|---|
@@ -219,7 +392,7 @@ task `failed`, and `transport_acknowledged` to delivery `delivered`. Free-form
 exception strings, model output, paths, and user text do not belong in this
 database.
 
-## CLI output and privacy contract
+### CLI output and privacy contract
 
 For ordinary state/database invocations other than `--help` and `--version`, the
 CLI writes one compact, key-sorted JSON line to standard output and nothing to
@@ -255,7 +428,7 @@ Codes are optional. `created` and `started` are reserved for ledger-generated
 events. An idempotent retry of an already-recorded identical terminal state does
 not replace its original reason code.
 
-## Storage boundary
+### Storage boundary
 
 Use a dedicated local-filesystem directory controlled by the service account.
 On Linux and macOS, its final directory may not be group- or world-writable,
@@ -286,7 +459,7 @@ reliably identify every mapped or mounted remote filesystem, so deployment on a
 local disk is an operator requirement. It assumes processes with the same OS
 user identity are trusted; see `THREAT_MODEL.md` for the remaining limits.
 
-## Restart reconciliation
+### Restart reconciliation
 
 ```bash
 python -m task_state_guard --db ./task-state-guard.sqlite reconcile \
@@ -330,7 +503,7 @@ during the configured grace window, then becomes `failed` when delivery is
 required or `not_applicable` for internal work. This is durable bookkeeping, not
 exactly-once execution or exactly-once delivery.
 
-## Doctor and migration
+### Doctor and migration
 
 `doctor` checks SQLite integrity, the exact schema fingerprint and version,
 the exact closed set and values of schema metadata keys,
@@ -347,7 +520,7 @@ state. A v1 database containing arbitrary legacy reason text fails closed; make
 a SQLite-safe backup and perform an explicit private migration instead of
 logging or copying rejected values.
 
-## Tests
+### Tests
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3.12 -m unittest discover -s tests -v
@@ -386,47 +559,43 @@ audit or establish a Windows DACL. A separate Python 3.14 package matrix builds,
 audits, installs, and smoke-tests wheel and source distributions independently
 on Linux, macOS, and Windows.
 
-## FAQ / 常见问题
+## English FAQ
 
-### Does TaskStateGuard resume an interrupted AI agent task? / 能续跑中断任务吗？
+### Does TaskStateGuard resume an interrupted AI agent task?
 
 No. It preserves and reconciles lifecycle metadata; it does not checkpoint or
 resume computation. A stale running task becomes `timed_out` only after its
 deadline or configured grace period. The surrounding runtime decides whether
 to create a new retry.
 
-不能。它恢复的是“状态事实”，不是计算过程。是否重新执行必须由外部运行时决定。
-
-### Does it guarantee exactly-once execution or delivery? / 能保证恰好一次吗？
+### Does it guarantee exactly-once execution or delivery?
 
 No. It makes repeated identical closes idempotent and rejects conflicting
 terminal outcomes, but it cannot observe an external side effect. Mark delivery
 as `delivered` only after the transport records a real acknowledgement.
 
-不能。它防止状态被重复或冲突地改写，但外部副作用与真实投递回执仍由调用方负责。
-
-### Is it a Python task queue, scheduler, or workflow engine? / 它是任务队列吗？
+### Is it a Python task queue, scheduler, or workflow engine?
 
 No. TaskStateGuard stores a local SQLite state ledger. It does not enqueue,
 schedule, execute, cancel, retry, or transmit work. It can sit beside an agent
 runtime, worker pool, or workflow system that owns those responsibilities; this
 repository does not ship framework-specific adapters.
 
-### Why model task status and delivery status separately? / 为什么拆成两套状态？
+### Why model task status and delivery status separately?
 
 A task may finish successfully while its result is still pending, and an
 internal child task may require no direct user-facing delivery. Keeping the two
 state machines separate prevents a completed task from being mistaken for a
 confirmed delivery.
 
-### Does it store prompts, messages, or model output? / 会保存提示词和消息吗？
+### Does it store prompts, messages, or model output?
 
 No. Those values have no supported column or CLI argument. The optional
 SHA-256 payload fingerprint is correlatable pseudonymous metadata, not anonymous
 content, and should be omitted or keyed externally when offline guessing is a
 concern.
 
-### What is required on Windows, macOS, and Linux? / 各平台有什么要求？
+### What is required on Windows, macOS, and Linux?
 
 Use a local SQLite-compatible filesystem on every platform. Linux and macOS use
 owner/mode checks and `0600` database files. Windows requires a pre-created

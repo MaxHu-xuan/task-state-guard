@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import stat
@@ -13,6 +14,8 @@ import tarfile
 import tempfile
 import venv
 import zipfile
+from email import policy
+from email.parser import Parser
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -22,10 +25,78 @@ EXPECTED_NAME = "task-state-guard"
 EXPECTED_VERSION = "0.1.0"
 MAX_MEMBER_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
+EXPECTED_SINGLETON_METADATA = {
+    "Name": EXPECTED_NAME,
+    "Version": EXPECTED_VERSION,
+    "Requires-Python": ">=3.11",
+    "License-Expression": "Apache-2.0",
+}
+EXPECTED_REPOSITORY_URL = (
+    "Repository, https://github.com/MaxHu-xuan/task-state-guard"
+)
+EXPECTED_CONSOLE_ENTRYPOINTS = {
+    "task-state-guard": "task_state_guard.cli:main",
+}
 
 
 class ArtifactFailure(RuntimeError):
     """A fixed-category artifact verification failure."""
+
+
+def _normalize_newlines(value: str, error_code: str) -> str:
+    """Normalize LF/CRLF text while rejecting bare carriage returns."""
+
+    if "\x00" in value:
+        raise ArtifactFailure(error_code)
+    normalized = value.replace("\r\n", "\n")
+    if "\r" in normalized:
+        raise ArtifactFailure(error_code)
+    return normalized
+
+
+def _verify_core_metadata(metadata: str) -> None:
+    """Validate required wheel metadata independent of platform newlines."""
+
+    metadata = _normalize_newlines(metadata, "wheel_metadata_mismatch")
+    try:
+        message = Parser(policy=policy.default).parsestr(
+            metadata,
+            headersonly=True,
+        )
+    except (TypeError, ValueError):
+        raise ArtifactFailure("wheel_metadata_mismatch") from None
+    if message.defects:
+        raise ArtifactFailure("wheel_metadata_mismatch")
+    for name, expected in EXPECTED_SINGLETON_METADATA.items():
+        values = message.get_all(name, [])
+        if len(values) != 1 or str(values[0]) != expected:
+            raise ArtifactFailure("wheel_metadata_mismatch")
+    repository_urls = [str(value) for value in message.get_all("Project-URL", [])]
+    repository_entries = [
+        value
+        for value in repository_urls
+        if value.partition(",")[0].strip() == "Repository"
+    ]
+    if repository_entries != [EXPECTED_REPOSITORY_URL]:
+        raise ArtifactFailure("wheel_metadata_mismatch")
+
+
+def _verify_entrypoints(entrypoints: str) -> None:
+    """Validate the console entry point as strict, newline-neutral INI."""
+
+    entrypoints = _normalize_newlines(entrypoints, "wheel_entrypoint_mismatch")
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    try:
+        parser.read_string(entrypoints)
+    except configparser.Error:
+        raise ArtifactFailure("wheel_entrypoint_mismatch") from None
+    if (
+        parser.defaults()
+        or parser.sections() != ["console_scripts"]
+        or dict(parser.items("console_scripts")) != EXPECTED_CONSOLE_ENTRYPOINTS
+    ):
+        raise ArtifactFailure("wheel_entrypoint_mismatch")
 
 
 def _parts(name: str) -> Tuple[str, ...]:
@@ -102,18 +173,9 @@ def _verify_wheel(wheel: Path) -> int:
                 raise ArtifactFailure("wheel_content_missing")
 
             metadata = archive.read(metadata_names[0]).decode("utf-8", "strict")
-            required_metadata = (
-                "Name: %s\n" % EXPECTED_NAME,
-                "Version: %s\n" % EXPECTED_VERSION,
-                "Requires-Python: >=3.11\n",
-                "License-Expression: Apache-2.0\n",
-                "Project-URL: Repository, https://github.com/MaxHu-xuan/task-state-guard\n",
-            )
-            if not all(value in metadata for value in required_metadata):
-                raise ArtifactFailure("wheel_metadata_mismatch")
+            _verify_core_metadata(metadata)
             entrypoints = archive.read(entrypoint_names[0]).decode("utf-8", "strict")
-            if "task-state-guard = task_state_guard.cli:main" not in entrypoints:
-                raise ArtifactFailure("wheel_entrypoint_mismatch")
+            _verify_entrypoints(entrypoints)
             return sum(not info.is_dir() for info in infos)
     except (OSError, UnicodeError, zipfile.BadZipFile):
         raise ArtifactFailure("wheel_read_failed") from None

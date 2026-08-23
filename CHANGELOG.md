@@ -26,6 +26,9 @@ All notable changes to TaskStateGuard are documented here. The format follows
 - Keep queued tasks unchanged during restart reconciliation even when their
   precomputed deadline has passed; only running tasks are eligible for
   deadline-based timeout transitions.
+- Parse wheel core metadata as structured RFC-style headers so valid Windows
+  CRLF output is accepted while missing, duplicated, or body-only fields still
+  fail the artifact gate.
 
 ### Documentation
 

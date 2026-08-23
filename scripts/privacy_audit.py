@@ -118,6 +118,7 @@ REQUIRED_FILES = (
     "src/task_state_guard/model.py",
     "src/task_state_guard/reconcile.py",
     "src/task_state_guard/store.py",
+    "tests/test_artifact_smoke.py",
     "tests/test_task_state_guard.py",
 )
 REPOSITORY_REQUIRED_FILES = (
