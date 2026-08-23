@@ -20,3 +20,15 @@ All notable changes to TaskStateGuard are documented here. The format follows
   points, non-regular files, and multiple hardlinks.
 - Cross-platform tests, privacy auditing, and isolated package-install smoke
   checks.
+
+### Fixed
+
+- Keep queued tasks unchanged during restart reconciliation even when their
+  precomputed deadline has passed; only running tasks are eligible for
+  deadline-based timeout transitions.
+
+### Documentation
+
+- Add answer-first English and Chinese guidance for agent restart recovery,
+  SQLite task reconciliation, delivery acknowledgement, platform boundaries,
+  and common integration questions.

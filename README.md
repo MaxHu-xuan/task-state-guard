@@ -24,6 +24,30 @@ responsible for executing work and recording real transport acknowledgements.
 中文定位：它只记录和校验状态，不负责执行、重试、调度或发送任务，也不会把超时、
 失联或未确认的外部副作用推测为成功。
 
+## What TaskStateGuard solves / 它解决什么
+
+TaskStateGuard answers one narrow operational question: after an AI agent or
+worker process restarts, which tasks are still active, which have reached a real
+terminal state, and which results still lack a transport acknowledgement? It
+persists bounded state metadata in SQLite and reconciles stale records without
+guessing that work or delivery succeeded.
+
+一句话说明：它是面向 AI 智能体与后台 worker 的“重启安全任务状态账本”，用于收敛
+SQLite 中的卡死任务和待投递状态；它不会恢复任务正文，也不会伪造成功或已送达。
+
+| Common question / 常见需求 | TaskStateGuard's answer / 能力边界 |
+|---|---|
+| How do I reconcile stale agent tasks after a process restart? / 进程重启后如何收敛卡死任务？ | Call `reconcile_restart()` or the `reconcile` CLI with explicit active and delivery grace periods. |
+| How do I track task completion separately from result delivery? / 如何区分任务完成和结果送达？ | Independent task and delivery state machines preserve both facts. |
+| How do I audit a SQLite task ledger without exposing task data? / 如何安全诊断 SQLite 任务账本？ | `doctor` returns aggregate counts and health signals, never task IDs or payload fingerprints. |
+| Can the same state ledger run on Linux, macOS, and Windows? / 是否跨平台？ | Yes, with POSIX mode enforcement on Linux/macOS and an explicit externally managed ACL boundary on Windows. |
+| Does restart recovery require storing prompts or task bodies? / 是否需要保存提示词或正文？ | No. The schema has no plaintext payload field; an optional validated SHA-256 fingerprint is the only payload-derived value. |
+
+Use TaskStateGuard when a trusted Python runtime already executes work but needs
+a small, local, restart-safe source of truth for task lifecycle and delivery
+acknowledgement. Do not use it as a distributed queue, workflow orchestrator,
+process supervisor, retry service, transport, or exactly-once guarantee.
+
 ## Why it exists
 
 Agent runtimes often have two different truths:
@@ -282,6 +306,22 @@ The reconciler performs one atomic transaction:
 
 The report contains counts only, never task IDs.
 
+The same operation is available to an embedded Python runtime:
+
+```python
+from task_state_guard import Ledger, ReconcilePolicy, reconcile_restart
+
+ledger = Ledger("./task-state-guard.sqlite")
+counts = reconcile_restart(
+    ledger,
+    ReconcilePolicy(
+        active_grace_seconds=600,
+        delivery_grace_seconds=600,
+    ),
+)
+print(counts["tasks_timed_out"], counts["deliveries_failed"])
+```
+
 Reconciliation runs only when the caller invokes it; there is no background
 watcher. It never changes a queued task into success, never retries work, and
 never claims that a transport completed. A stale running task is closed as
@@ -345,6 +385,54 @@ external-ACL boundary and portable state/locking behavior; they do not claim to
 audit or establish a Windows DACL. A separate Python 3.14 package matrix builds,
 audits, installs, and smoke-tests wheel and source distributions independently
 on Linux, macOS, and Windows.
+
+## FAQ / 常见问题
+
+### Does TaskStateGuard resume an interrupted AI agent task? / 能续跑中断任务吗？
+
+No. It preserves and reconciles lifecycle metadata; it does not checkpoint or
+resume computation. A stale running task becomes `timed_out` only after its
+deadline or configured grace period. The surrounding runtime decides whether
+to create a new retry.
+
+不能。它恢复的是“状态事实”，不是计算过程。是否重新执行必须由外部运行时决定。
+
+### Does it guarantee exactly-once execution or delivery? / 能保证恰好一次吗？
+
+No. It makes repeated identical closes idempotent and rejects conflicting
+terminal outcomes, but it cannot observe an external side effect. Mark delivery
+as `delivered` only after the transport records a real acknowledgement.
+
+不能。它防止状态被重复或冲突地改写，但外部副作用与真实投递回执仍由调用方负责。
+
+### Is it a Python task queue, scheduler, or workflow engine? / 它是任务队列吗？
+
+No. TaskStateGuard stores a local SQLite state ledger. It does not enqueue,
+schedule, execute, cancel, retry, or transmit work. It can sit beside an agent
+runtime, worker pool, or workflow system that owns those responsibilities; this
+repository does not ship framework-specific adapters.
+
+### Why model task status and delivery status separately? / 为什么拆成两套状态？
+
+A task may finish successfully while its result is still pending, and an
+internal child task may require no direct user-facing delivery. Keeping the two
+state machines separate prevents a completed task from being mistaken for a
+confirmed delivery.
+
+### Does it store prompts, messages, or model output? / 会保存提示词和消息吗？
+
+No. Those values have no supported column or CLI argument. The optional
+SHA-256 payload fingerprint is correlatable pseudonymous metadata, not anonymous
+content, and should be omitted or keyed externally when offline guessing is a
+concern.
+
+### What is required on Windows, macOS, and Linux? / 各平台有什么要求？
+
+Use a local SQLite-compatible filesystem on every platform. Linux and macOS use
+owner/mode checks and `0600` database files. Windows requires a pre-created
+service-account directory with a private DACL plus `allow_external_acl=True`;
+the standard library cannot verify that DACL. Network and mapped drives are not
+supported.
 
 ## Project status
 

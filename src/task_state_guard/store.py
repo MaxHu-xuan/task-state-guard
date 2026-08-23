@@ -1155,7 +1155,9 @@ class Ledger:
                 self._task_from_row(row)
                 status = TaskStatus(row["status"])
                 deadline_expired = (
-                    row["deadline_at"] is not None and float(row["deadline_at"]) <= now
+                    status is TaskStatus.RUNNING
+                    and row["deadline_at"] is not None
+                    and float(row["deadline_at"]) <= now
                 )
                 restart_stale = (
                     status is TaskStatus.RUNNING

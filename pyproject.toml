@@ -5,18 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "task-state-guard"
 version = "0.1.0"
-description = "A privacy-minimal SQLite task ledger for crash-safe agent runtimes"
+description = "Restart-safe SQLite task-state and delivery reconciliation for AI agent runtimes"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "TaskStateGuard contributors" }]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = [
+  "agent-recovery",
   "agent-runtime",
+  "ai-agents",
   "crash-recovery",
+  "delivery-reconciliation",
+  "restart-safe",
   "sqlite",
-  "state-machine",
-  "task-management",
+  "task-reconciliation",
+  "task-state-machine",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

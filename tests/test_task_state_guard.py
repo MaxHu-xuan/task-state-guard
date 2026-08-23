@@ -366,6 +366,22 @@ class LedgerTestCase(unittest.TestCase):
         self.assertEqual(closed.status, TaskStatus.TIMED_OUT)
         self.assertEqual(closed.terminal_code, "deadline_exceeded")
 
+    def test_queued_task_past_deadline_remains_consistent(self):
+        task = self.ledger.create_task(timeout_seconds=30)
+        self.clock.advance(31)
+
+        report = reconcile_restart(
+            self.ledger,
+            ReconcilePolicy(active_grace_seconds=10, delivery_grace_seconds=60),
+        )
+
+        self.assertEqual(report["tasks_timed_out"], 0)
+        self.assertEqual(report["fresh_active_retained"], 1)
+        self.assertEqual(self.ledger.get_task(task.id).status, TaskStatus.QUEUED)
+        doctor = self.ledger.doctor()
+        self.assertTrue(doctor["healthy"])
+        self.assertEqual(doctor["event_count"], 1)
+
     def test_restart_grace_retains_fresh_then_closes_stale_running(self):
         queued = self.ledger.create_task()
         running = self.ledger.create_task()
