@@ -5,22 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "task-state-guard"
 version = "0.1.0"
-description = "Restart-safe SQLite task-state and delivery reconciliation for AI agent runtimes"
+description = "Preview and reconcile SQLite task and delivery state after agent timeouts or restarts"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "TaskStateGuard contributors" }]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = [
-  "agent-recovery",
   "agent-runtime",
   "ai-agents",
-  "crash-recovery",
-  "delivery-reconciliation",
-  "restart-safe",
+  "delivery-state",
+  "restart-recovery",
   "sqlite",
-  "task-reconciliation",
+  "stuck-task-recovery",
   "task-state-machine",
+  "task-state-reconciliation",
+  "terminal-state",
+  "timeout-recovery",
+  "workflow-observability",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",

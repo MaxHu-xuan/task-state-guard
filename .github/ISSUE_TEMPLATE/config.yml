@@ -5,4 +5,4 @@ contact_links:
     about: Report security-sensitive findings privately; never include production data.
   - name: Support and scope
     url: https://github.com/MaxHu-xuan/task-state-guard/blob/main/SUPPORT.md
-    about: Read the supported platforms, boundaries, and safe reporting guidance.
+    about: Find the right channel for setup, state-model, recovery, and platform questions.

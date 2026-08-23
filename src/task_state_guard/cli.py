@@ -28,7 +28,9 @@ class SafeArgumentParser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = SafeArgumentParser(
         prog="task-state-guard",
-        description="Crash-safe task metadata without plaintext payload storage.",
+        description=(
+            "Preview and reconcile SQLite task and delivery state after timeouts or restarts."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -86,9 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery.add_argument("--code")
 
-    reconcile = subparsers.add_parser("reconcile")
+    reconcile = subparsers.add_parser(
+        "reconcile",
+        help="Preview or apply stale task and delivery transitions",
+    )
     reconcile.add_argument("--active-grace-seconds", type=float, default=600.0)
     reconcile.add_argument("--delivery-grace-seconds", type=float, default=600.0)
+    reconcile.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview aggregate reconciliation counts without changing the ledger",
+    )
 
     subparsers.add_parser("doctor", help="Emit aggregate counts only")
     return parser
@@ -97,7 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = build_parser().parse_args(argv)
-        ledger = Ledger(args.db, allow_external_acl=args.allow_external_acl)
+        ledger = Ledger(
+            args.db,
+            allow_external_acl=args.allow_external_acl,
+            read_only=args.command == "reconcile" and args.dry_run,
+        )
         if args.command == "init":
             _emit({"ok": True, "storage": ledger.storage_info()})
         elif args.command == "create":
@@ -124,7 +138,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 active_grace_seconds=args.active_grace_seconds,
                 delivery_grace_seconds=args.delivery_grace_seconds,
             )
-            _emit({"ok": True, "reconcile": reconcile_restart(ledger, policy)})
+            _emit(
+                {
+                    "ok": True,
+                    "reconcile": reconcile_restart(
+                        ledger,
+                        policy,
+                        dry_run=args.dry_run,
+                    ),
+                }
+            )
         elif args.command == "doctor":
             report = ledger.doctor()
             _emit(report)

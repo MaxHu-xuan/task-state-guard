@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -165,6 +166,22 @@ class LedgerTestCase(unittest.TestCase):
             candidate = Path(str(database) + suffix)
             if candidate.exists():
                 self.assertNotIn(marker.encode("utf-8"), candidate.read_bytes())
+
+    def _storage_snapshot(self):
+        parent_metadata = self.db.parent.stat()
+        entries = {}
+        for entry in sorted(self.db.parent.iterdir(), key=lambda item: item.name):
+            metadata = entry.lstat()
+            entries[entry.name] = {
+                "bytes": entry.read_bytes() if stat.S_ISREG(metadata.st_mode) else None,
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "mtime_ns": metadata.st_mtime_ns,
+            }
+        return {
+            "directory_mode": stat.S_IMODE(parent_metadata.st_mode),
+            "directory_mtime_ns": parent_metadata.st_mtime_ns,
+            "entries": entries,
+        }
 
     def test_storage_is_private_wal_and_healthy(self):
         info = self.ledger.storage_info()
@@ -400,6 +417,341 @@ class LedgerTestCase(unittest.TestCase):
         self.assertEqual(self.ledger.get_task(running.id).status, TaskStatus.TIMED_OUT)
         self.assertEqual(self.ledger.get_task(queued.id).status, TaskStatus.QUEUED)
 
+    def test_reconcile_dry_run_is_read_only_and_matches_apply_at_frozen_time(self):
+        running = self.ledger.create_task()
+        external = self.ledger.create_task(delivery_required=True)
+        internal = self.ledger.create_task(delivery_required=False)
+        self.ledger.start_task(running.id)
+        self.ledger.close_task(external.id, "succeeded", code="worker_completed")
+        self.ledger.close_task(internal.id, "succeeded", code="worker_completed")
+        self.clock.advance(11)
+
+        def logical_dump():
+            connection = sqlite3.connect(str(self.db))
+            try:
+                return "\n".join(connection.iterdump())
+            finally:
+                connection.close()
+
+        before_dump = logical_dump()
+        before_doctor = self.ledger.doctor()
+        policy = ReconcilePolicy(
+            active_grace_seconds=10,
+            delivery_grace_seconds=10,
+        )
+
+        with mock.patch.object(
+            Ledger,
+            "_event",
+            side_effect=AssertionError("dry-run must not append events"),
+        ):
+            preview = reconcile_restart(self.ledger, policy, dry_run=True)
+
+        self.assertIs(preview["dry_run"], True)
+        self.assertIs(preview["applied"], False)
+        self.assertEqual(preview["tasks_timed_out"], 1)
+        self.assertEqual(preview["deliveries_failed"], 1)
+        self.assertEqual(preview["deliveries_not_applicable"], 1)
+        self.assertEqual(preview["pending_delivery_examined"], 3)
+        self.assertEqual(preview["pending_delivery_retained"], 1)
+        self.assertEqual(logical_dump(), before_dump)
+        self.assertEqual(self.ledger.doctor(), before_doctor)
+        self.assertEqual(self.ledger.get_task(running.id).status, TaskStatus.RUNNING)
+        self.assertEqual(
+            self.ledger.get_task(external.id).delivery_status,
+            DeliveryStatus.PENDING,
+        )
+        self.assertNotIn(running.id, json.dumps(preview, sort_keys=True))
+
+        applied = reconcile_restart(self.ledger, policy)
+
+        self.assertIs(applied["dry_run"], False)
+        self.assertIs(applied["applied"], True)
+        preview_counts = {
+            key: value
+            for key, value in preview.items()
+            if key not in {"dry_run", "applied"}
+        }
+        applied_counts = {
+            key: value
+            for key, value in applied.items()
+            if key not in {"dry_run", "applied"}
+        }
+        self.assertEqual(applied_counts, preview_counts)
+        self.assertEqual(
+            self.ledger.get_task(running.id).status,
+            TaskStatus.TIMED_OUT,
+        )
+        self.assertEqual(
+            self.ledger.get_task(external.id).delivery_status,
+            DeliveryStatus.FAILED,
+        )
+        self.assertEqual(
+            self.ledger.get_task(internal.id).delivery_status,
+            DeliveryStatus.NOT_APPLICABLE,
+        )
+
+    def test_reconcile_dry_run_fixes_snapshot_before_sampling_clock(self):
+        task = self.ledger.create_task(timeout_seconds=0)
+        self.ledger.start_task(task.id)
+        preview_time = self.clock.value
+        clock_reached = threading.Event()
+        heartbeat_finished = threading.Event()
+
+        def preview_clock():
+            clock_reached.set()
+            self.assertTrue(heartbeat_finished.wait(5))
+            return preview_time
+
+        preview_ledger = _ledger(self.db, clock=preview_clock, read_only=True)
+        writer_ledger = _ledger(
+            self.db,
+            clock=lambda: preview_time + 1,
+            busy_timeout_ms=5_000,
+        )
+        policy = ReconcilePolicy(
+            active_grace_seconds=600,
+            delivery_grace_seconds=600,
+        )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                reconcile_restart,
+                preview_ledger,
+                policy,
+                dry_run=True,
+            )
+            self.assertTrue(clock_reached.wait(5))
+            writer_ledger.heartbeat(task.id)
+            heartbeat_finished.set()
+            preview = future.result(timeout=5)
+
+        self.assertEqual(preview["tasks_timed_out"], 1)
+        self.assertIs(preview["dry_run"], True)
+        self.assertEqual(self.ledger.get_task(task.id).status, TaskStatus.RUNNING)
+        self.assertEqual(self.ledger.get_task(task.id).updated_at, preview_time + 1)
+
+    def test_cli_dry_run_reads_safe_v1_without_migrating_or_changing_bytes(self):
+        task = self.ledger.create_task()
+        self.ledger.start_task(task.id)
+        with _sqlite_connection(self.db) as connection:
+            connection.execute(
+                "UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'"
+            )
+            connection.execute(
+                "DELETE FROM schema_meta WHERE key = 'schema_fingerprint'"
+            )
+
+        def logical_dump():
+            connection = sqlite3.connect(str(self.db))
+            try:
+                return "\n".join(connection.iterdump())
+            finally:
+                connection.close()
+
+        before_bytes = self.db.read_bytes()
+        before_dump = logical_dump()
+        before_storage = self._storage_snapshot()
+        code, stdout, stderr = self._run_cli(
+            [
+                "--db",
+                str(self.db),
+                "reconcile",
+                "--active-grace-seconds",
+                "0",
+                "--delivery-grace-seconds",
+                "600",
+                "--dry-run",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        report = json.loads(stdout)["reconcile"]
+        self.assertIs(report["dry_run"], True)
+        self.assertIs(report["applied"], False)
+        self.assertEqual(self._storage_snapshot(), before_storage)
+        self.assertEqual(self.db.read_bytes(), before_bytes)
+        self.assertEqual(logical_dump(), before_dump)
+        with _sqlite_connection(self.db) as connection:
+            metadata = connection.execute(
+                "SELECT key, value FROM schema_meta ORDER BY key"
+            ).fetchall()
+        self.assertEqual(metadata, [("schema_version", "1")])
+
+    def test_cli_dry_run_does_not_touch_existing_wal_sidecars(self):
+        task = self.ledger.create_task(timeout_seconds=0)
+        self.ledger.start_task(task.id)
+        keeper = sqlite3.connect(str(self.db), isolation_level=None)
+        try:
+            keeper.execute("BEGIN")
+            keeper.execute("SELECT COUNT(*) FROM tasks").fetchone()
+            # A normal ledger connection applies the documented permission
+            # boundary before the read-only filesystem snapshot is taken.
+            self.ledger.storage_info()
+            expected = {
+                self.db.name,
+                self.db.name + "-shm",
+                self.db.name + "-wal",
+            }
+            before_storage = self._storage_snapshot()
+            self.assertTrue(expected.issubset(before_storage["entries"]))
+
+            with mock.patch.object(
+                Ledger,
+                "_connect_stable_snapshot",
+                side_effect=AssertionError(
+                    "an existing WAL/SHM pair must use SQLite read-only locking"
+                ),
+            ):
+                code, stdout, stderr = self._run_cli(
+                    [
+                        "--db",
+                        str(self.db),
+                        "reconcile",
+                        "--active-grace-seconds",
+                        "0",
+                        "--delivery-grace-seconds",
+                        "600",
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            report = json.loads(stdout)["reconcile"]
+            self.assertIs(report["dry_run"], True)
+            self.assertIs(report["applied"], False)
+            self.assertNotIn(task.id, stdout)
+            self.assertEqual(self._storage_snapshot(), before_storage)
+        finally:
+            if keeper.in_transaction:
+                keeper.execute("ROLLBACK")
+            keeper.close()
+
+    def test_cli_dry_run_rejects_incomplete_sidecars_without_touching_them(self):
+        incomplete_wal = Path(str(self.db) + "-wal")
+        incomplete_wal.write_bytes(b"")
+        if os.name == "posix":
+            incomplete_wal.chmod(0o600)
+        before_storage = self._storage_snapshot()
+
+        code, stdout, stderr = self._run_cli(
+            ["--db", str(self.db), "reconcile", "--dry-run"]
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout), {"error": "StateConflict", "ok": False})
+        self.assertEqual(self._storage_snapshot(), before_storage)
+
+    def test_closed_wal_snapshot_detects_concurrent_writer_checkpoint(self):
+        task = self.ledger.create_task(timeout_seconds=0)
+        self.ledger.start_task(task.id)
+        writer = _ledger(self.db, clock=lambda: self.clock.value + 1)
+        original_pass = Ledger._read_snapshot_pass
+        raced = {"done": False}
+
+        def snapshot_pass(instance, *, capture):
+            result = original_pass(instance, capture=capture)
+            if instance._read_only and not capture and not raced["done"]:
+                raced["done"] = True
+                writer.heartbeat(task.id)
+                with _sqlite_connection(self.db) as connection:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return result
+
+        with mock.patch.object(Ledger, "_read_snapshot_pass", snapshot_pass):
+            code, stdout, stderr = self._run_cli(
+                ["--db", str(self.db), "reconcile", "--dry-run"]
+            )
+
+        self.assertTrue(raced["done"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout), {"error": "StateConflict", "ok": False})
+        self.assertNotIn(task.id, stdout)
+        self.assertEqual(self.ledger.get_task(task.id).status, TaskStatus.RUNNING)
+        self.assertEqual(self.ledger.get_task(task.id).updated_at, self.clock.value + 1)
+
+    def test_closed_wal_snapshot_limit_and_deserializer_fail_value_free(self):
+        before_storage = self._storage_snapshot()
+        with mock.patch.object(
+            Ledger,
+            "_READ_ONLY_SNAPSHOT_MAX_BYTES",
+            self.db.stat().st_size - 1,
+        ):
+            code, stdout, stderr = self._run_cli(
+                ["--db", str(self.db), "reconcile", "--dry-run"]
+            )
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout), {"error": "StateConflict", "ok": False})
+        self.assertEqual(self._storage_snapshot(), before_storage)
+
+        with self.assertRaises(StateConflict):
+            Ledger._deserialize_database_snapshot(object(), bytearray(b"synthetic"))
+
+    def test_closed_wal_snapshot_buffer_is_wiped_without_temp_files(self):
+        before_storage = self._storage_snapshot()
+        read_only_ledger = _ledger(self.db, clock=self.clock, read_only=True)
+        connection = read_only_ledger._connect()
+        snapshot = connection._snapshot_buffer
+        self.assertGreater(len(snapshot), 20)
+        connection.close()
+
+        self.assertEqual(snapshot, bytearray())
+        self.assertEqual(self._storage_snapshot(), before_storage)
+
+    def test_read_only_ledger_fails_closed_for_writes_and_missing_storage(self):
+        read_only_ledger = _ledger(self.db, clock=self.clock, read_only=True)
+        before_bytes = self.db.read_bytes()
+        with self.assertRaises(StateConflict):
+            read_only_ledger.create_task()
+        self.assertEqual(self.db.read_bytes(), before_bytes)
+
+        missing = Path(self.tempdir.name) / "missing" / "ledger.sqlite"
+        with self.assertRaises(InvalidInput):
+            _ledger(missing, read_only=True)
+        self.assertFalse(missing.parent.exists())
+
+    def test_cli_reconcile_dry_run_is_explicit_and_value_free(self):
+        task = self.ledger.create_task()
+        self.ledger.start_task(task.id)
+
+        arguments = [
+            "--db",
+            str(self.db),
+            "reconcile",
+            "--active-grace-seconds",
+            "0",
+            "--delivery-grace-seconds",
+            "0",
+        ]
+        preview_code, preview_stdout, preview_stderr = self._run_cli(
+            [*arguments, "--dry-run"]
+        )
+        preview = json.loads(preview_stdout)["reconcile"]
+
+        self.assertEqual(preview_code, 0)
+        self.assertEqual(preview_stderr, "")
+        self.assertIs(preview["dry_run"], True)
+        self.assertIs(preview["applied"], False)
+        self.assertNotIn(task.id, preview_stdout)
+        self.assertEqual(self.ledger.get_task(task.id).status, TaskStatus.RUNNING)
+
+        apply_code, apply_stdout, apply_stderr = self._run_cli(arguments)
+        applied = json.loads(apply_stdout)["reconcile"]
+        self.assertEqual(apply_code, 0)
+        self.assertEqual(apply_stderr, "")
+        self.assertIs(applied["dry_run"], False)
+        self.assertIs(applied["applied"], True)
+        self.assertEqual(
+            {key: value for key, value in preview.items() if key not in {"dry_run", "applied"}},
+            {key: value for key, value in applied.items() if key not in {"dry_run", "applied"}},
+        )
+        self.assertEqual(self.ledger.get_task(task.id).status, TaskStatus.TIMED_OUT)
+
     def test_cancel_from_queue_is_terminal(self):
         task = self.ledger.create_task()
         cancelled = self.ledger.close_task(task.id, "cancelled", code="caller_cancelled")
@@ -554,6 +906,12 @@ class LedgerTestCase(unittest.TestCase):
             self.ledger.close_task(task.id, "running")
         with self.assertRaises(InvalidInput):
             self.ledger.close_task(task.id, "failed", code="contains spaces")
+        with self.assertRaises(InvalidInput):
+            self.ledger.reconcile(
+                active_grace_seconds=10,
+                delivery_grace_seconds=10,
+                dry_run="yes",
+            )
 
     def test_doctor_detects_timestamp_inconsistency(self):
         task = self.ledger.create_task()
@@ -1002,6 +1360,16 @@ class LedgerTestCase(unittest.TestCase):
             connection.execute(
                 "DELETE FROM schema_meta WHERE key = 'schema_fingerprint'"
             )
+
+        before_bytes = self.db.read_bytes()
+        code, stdout, stderr = self._run_cli(
+            ["--db", str(self.db), "reconcile", "--dry-run"]
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        self.assertEqual(json.loads(stdout), {"error": "StateConflict", "ok": False})
+        self.assertNotIn(marker, stdout)
+        self.assertEqual(self.db.read_bytes(), before_bytes)
 
         with self.assertRaises(StateConflict) as caught:
             _ledger(self.db)

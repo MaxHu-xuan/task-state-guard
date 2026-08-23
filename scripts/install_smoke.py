@@ -164,6 +164,91 @@ def smoke() -> Dict[str, object]:
             if result.get("ok") is not True:
                 raise InstallFailure("lifecycle_contract_failed")
 
+        preview_task = _run_json(
+            module,
+            [*common, "create", "--timeout-seconds", "0"],
+            directory=directory,
+            environment=environment,
+        ).get("task")
+        if not isinstance(preview_task, dict) or not isinstance(
+            preview_task.get("id"), str
+        ):
+            raise InstallFailure("preview_task_missing")
+        preview_task_id = preview_task["id"]
+        _run_json(
+            module,
+            [*common, "start", preview_task_id],
+            directory=directory,
+            environment=environment,
+        )
+        before_preview = _run_json(
+            module,
+            [*common, "doctor"],
+            directory=directory,
+            environment=environment,
+        )
+        preview_payload = _run_json(
+            module,
+            [
+                *common,
+                "reconcile",
+                "--active-grace-seconds",
+                "0",
+                "--delivery-grace-seconds",
+                "600",
+                "--dry-run",
+            ],
+            directory=directory,
+            environment=environment,
+        )
+        preview = preview_payload.get("reconcile")
+        after_preview = _run_json(
+            module,
+            [*common, "doctor"],
+            directory=directory,
+            environment=environment,
+        )
+        if (
+            not isinstance(preview, dict)
+            or preview.get("dry_run") is not True
+            or preview.get("applied") is not False
+            or preview.get("tasks_timed_out") != 1
+            or before_preview != after_preview
+            or preview_task_id in json.dumps(preview, sort_keys=True)
+        ):
+            raise InstallFailure("reconcile_preview_contract_failed")
+
+        applied_payload = _run_json(
+            module,
+            [
+                *common,
+                "reconcile",
+                "--active-grace-seconds",
+                "0",
+                "--delivery-grace-seconds",
+                "600",
+            ],
+            directory=directory,
+            environment=environment,
+        )
+        applied = applied_payload.get("reconcile")
+        if (
+            not isinstance(applied, dict)
+            or applied.get("dry_run") is not False
+            or applied.get("applied") is not True
+            or {
+                key: value
+                for key, value in applied.items()
+                if key not in {"dry_run", "applied"}
+            }
+            != {
+                key: value
+                for key, value in preview.items()
+                if key not in {"dry_run", "applied"}
+            }
+        ):
+            raise InstallFailure("reconcile_apply_contract_failed")
+
         doctor = _run_json(
             module,
             [*common, "doctor"],
@@ -173,14 +258,14 @@ def smoke() -> Dict[str, object]:
         if (
             doctor.get("healthy") is not True
             or doctor.get("quick_check") != "ok"
-            or doctor.get("task_count") != 1
-            or doctor.get("event_count") != 4
+            or doctor.get("task_count") != 2
+            or doctor.get("event_count") != 7
         ):
             raise InstallFailure("doctor_contract_failed")
 
     return {
         "code": "ok",
-        "lifecycle_count": 4,
+        "lifecycle_count": 7,
         "ok": True,
         "permission_model": expected_permission,
         "schema": "task-state-guard-install-smoke-v1",

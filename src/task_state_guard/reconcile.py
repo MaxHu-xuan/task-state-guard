@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Union
 
 from .model import validate_nonnegative_number
 from .store import Ledger
@@ -30,10 +30,16 @@ class ReconcilePolicy:
         )
 
 
-def reconcile_restart(ledger: Ledger, policy: ReconcilePolicy) -> Dict[str, int]:
-    """Reconcile restart state and return aggregate counts only."""
+def reconcile_restart(
+    ledger: Ledger,
+    policy: ReconcilePolicy,
+    *,
+    dry_run: bool = False,
+) -> Dict[str, Union[bool, int]]:
+    """Preview or apply restart reconciliation and return aggregate counts."""
 
     return ledger.reconcile(
         active_grace_seconds=policy.active_grace_seconds,
         delivery_grace_seconds=policy.delivery_grace_seconds,
+        dry_run=dry_run,
     )
