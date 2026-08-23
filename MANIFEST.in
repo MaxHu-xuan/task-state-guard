@@ -1,0 +1,8 @@
+include CONTRIBUTING.md
+include LICENSE
+include PROVENANCE.md
+include README.md
+include SECURITY.md
+include THREAT_MODEL.md
+include scripts/privacy_audit.py
+recursive-include tests *.py
