@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 import uuid
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -59,6 +59,18 @@ def _platform_cli_arguments(arguments):
     if os.name == "nt":
         return ["--allow-external-acl", *arguments]
     return arguments
+
+
+@contextmanager
+def _sqlite_connection(path):
+    """Manage both the SQLite transaction and the connection lifetime."""
+
+    connection = sqlite3.connect(str(path))
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def _worker_error_category(error):
@@ -146,7 +158,7 @@ class LedgerTestCase(unittest.TestCase):
 
     def _assert_marker_absent_from_storage(self, marker, database=None):
         database = Path(database or self.db)
-        with sqlite3.connect(str(database)) as connection:
+        with _sqlite_connection(database) as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         for suffix in ("", "-journal", "-wal", "-shm"):
             candidate = Path(str(database) + suffix)
@@ -164,7 +176,7 @@ class LedgerTestCase(unittest.TestCase):
         )
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.db.stat().st_mode), 0o600)
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute("BEGIN IMMEDIATE")
             for suffix in ("-wal", "-shm"):
                 sidecar = Path(str(self.db) + suffix)
@@ -176,11 +188,46 @@ class LedgerTestCase(unittest.TestCase):
         self.assertTrue(report["healthy"])
         self.assertEqual(report["quick_check"], "ok")
 
+    def test_ledger_closes_every_internal_connection_on_success_and_error(self):
+        database = Path(self.tempdir.name) / "connection-lifecycle.sqlite"
+        real_connect = sqlite3.connect
+        opened = []
+
+        class TrackingConnection(sqlite3.Connection):
+            close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+                return super().close()
+
+        def tracked_connect(*args, **kwargs):
+            kwargs["factory"] = TrackingConnection
+            connection = real_connect(*args, **kwargs)
+            opened.append(connection)
+            return connection
+
+        with mock.patch(
+            "task_state_guard.store.sqlite3.connect", side_effect=tracked_connect
+        ):
+            ledger = _ledger(database, clock=self.clock)
+            task = ledger.create_task()
+            ledger.get_task(task.id)
+            with self.assertRaises(TaskNotFound):
+                ledger.get_task(str(uuid.uuid4()))
+            ledger.doctor()
+            ledger.storage_info()
+
+        self.assertTrue(opened)
+        self.assertTrue(all(connection.close_calls == 1 for connection in opened))
+        for connection in opened:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
     def test_existing_database_mode_is_tightened_without_temp_artifacts(self):
         directory = Path(self.tempdir.name) / "private-state"
         directory.mkdir(mode=0o700)
         database = directory / "existing.sqlite"
-        with sqlite3.connect(str(database)):
+        with _sqlite_connection(database):
             pass
         if os.name == "posix":
             database.chmod(0o666)
@@ -467,7 +514,7 @@ class LedgerTestCase(unittest.TestCase):
         task_json = json.dumps(self.ledger.get_task(task.id).to_dict(), sort_keys=True)
         self.assertNotIn(plaintext, doctor_json)
         self.assertNotIn(plaintext, task_json)
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         for path in (self.db, Path(str(self.db) + "-wal"), Path(str(self.db) + "-shm")):
             if path.exists():
@@ -493,7 +540,7 @@ class LedgerTestCase(unittest.TestCase):
 
     def test_doctor_detects_timestamp_inconsistency(self):
         task = self.ledger.create_task()
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET updated_at = created_at - 1 WHERE id = ?", (task.id,)
             )
@@ -528,7 +575,7 @@ class LedgerTestCase(unittest.TestCase):
         )
         self.assertTrue(healthy_report["healthy"])
 
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute("UPDATE tasks SET updated_at = created_at - 1")
         unhealthy_code, unhealthy_stdout, unhealthy_stderr = self._run_cli(arguments)
         unhealthy_report = json.loads(unhealthy_stdout)
@@ -542,7 +589,7 @@ class LedgerTestCase(unittest.TestCase):
 
     def test_symlink_database_is_rejected_without_touching_target(self):
         target = Path(self.tempdir.name) / "unrelated.sqlite"
-        with sqlite3.connect(str(target)) as connection:
+        with _sqlite_connection(target) as connection:
             connection.execute("CREATE TABLE unrelated(value TEXT)")
         target.chmod(0o644)
         before_mode = stat.S_IMODE(target.stat().st_mode)
@@ -559,7 +606,7 @@ class LedgerTestCase(unittest.TestCase):
             _ledger(alias)
 
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), before_mode)
-        with sqlite3.connect(str(target)) as connection:
+        with _sqlite_connection(target) as connection:
             names = {
                 row[0]
                 for row in connection.execute(
@@ -798,6 +845,10 @@ class LedgerTestCase(unittest.TestCase):
 
     def test_module_cli_accepts_unicode_and_space_database_path(self):
         database = Path(self.tempdir.name) / "state 空格" / "任务.sqlite"
+        if os.name == "nt":
+            # External ACL mode deliberately requires a pre-created parent;
+            # acknowledgement must not silently weaken that production boundary.
+            database.parent.mkdir()
         command = [
             sys.executable,
             "-m",
@@ -824,7 +875,7 @@ class LedgerTestCase(unittest.TestCase):
 
     def test_schema_spoof_is_rejected_and_v1_migrates(self):
         spoofed = Path(self.tempdir.name) / "spoofed.sqlite"
-        with sqlite3.connect(str(spoofed)) as connection:
+        with _sqlite_connection(spoofed) as connection:
             connection.execute(
                 "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
@@ -840,7 +891,7 @@ class LedgerTestCase(unittest.TestCase):
         with self.assertRaises(StateConflict):
             _ledger(spoofed)
 
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'"
             )
@@ -853,7 +904,7 @@ class LedgerTestCase(unittest.TestCase):
         self.assertEqual(report["schema_version"], Ledger.SCHEMA_VERSION)
 
     def test_schema_fingerprint_preserves_string_literal_case(self):
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             rows = connection.execute(
                 "SELECT type, name, sql FROM sqlite_master "
                 "WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
@@ -862,7 +913,7 @@ class LedgerTestCase(unittest.TestCase):
                 "SELECT key, value FROM schema_meta"
             ).fetchall()
         spoofed = Path(self.tempdir.name) / "case-spoofed.sqlite"
-        with sqlite3.connect(str(spoofed)) as connection:
+        with _sqlite_connection(spoofed) as connection:
             for object_type in ("table", "index"):
                 for row_type, name, sql in rows:
                     if row_type != object_type:
@@ -880,7 +931,7 @@ class LedgerTestCase(unittest.TestCase):
         task = self.ledger.create_task()
         self.ledger.close_task(task.id, "failed", code="worker_failed")
         marker = "reason_" + uuid.uuid4().hex
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET terminal_code = ? WHERE id = ?", (marker, task.id)
             )
@@ -899,7 +950,7 @@ class LedgerTestCase(unittest.TestCase):
         with self.assertRaises(StateConflict) as caught:
             _ledger(self.db)
         self.assertNotIn(marker, str(caught.exception))
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             version = connection.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()[0]
@@ -913,13 +964,13 @@ class LedgerTestCase(unittest.TestCase):
         task = self.ledger.create_task()
         self.ledger.start_task(task.id)
         self.ledger.close_task(task.id, "succeeded")
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute("DELETE FROM task_events")
         report = self.ledger.doctor()
         self.assertFalse(report["healthy"])
         self.assertEqual(report["event_inconsistency_count"], 1)
 
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE schema_meta SET value = '7' WHERE key = 'schema_version'"
             )
@@ -930,7 +981,7 @@ class LedgerTestCase(unittest.TestCase):
 
     def test_extra_schema_metadata_is_rejected_without_value_disclosure(self):
         marker = "synthetic_private_" + uuid.uuid4().hex
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
                 ("unexpected_metadata", marker),
@@ -959,7 +1010,7 @@ class LedgerTestCase(unittest.TestCase):
 
     def test_doctor_validates_exact_event_content(self):
         task = self.ledger.create_task()
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE task_events SET from_value = 'running', to_value = 'failed', "
                 "occurred_at = ? WHERE task_id = ?",
@@ -972,7 +1023,7 @@ class LedgerTestCase(unittest.TestCase):
     def test_doctor_detects_delivery_semantic_tampering(self):
         task = self.ledger.create_task(delivery_required=True)
         self.ledger.close_task(task.id, "succeeded")
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET delivery_status = 'not_applicable', "
                 "delivery_updated_at = ended_at WHERE id = ?",
@@ -996,7 +1047,7 @@ class LedgerTestCase(unittest.TestCase):
 
         later = _ledger(self.db, clock=lambda: 2_001.0)
         child = later.create_task(parent_id=parent.id)
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET created_at = 1999, updated_at = 1999, "
                 "delivery_updated_at = 1999 WHERE id = ?",
@@ -1013,7 +1064,7 @@ class LedgerTestCase(unittest.TestCase):
     def test_doctor_detects_parent_cycles(self):
         first = self.ledger.create_task()
         second = self.ledger.create_task()
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET parent_id = ? WHERE id = ?", (second.id, first.id)
             )
@@ -1028,7 +1079,7 @@ class LedgerTestCase(unittest.TestCase):
         synthetic_hex = ("a" * 12) + "4" + ("a" * 3) + "8" + ("a" * 15)
         task = self.ledger.create_task(task_id=str(uuid.UUID(hex=synthetic_hex)))
         noncanonical = task.id.upper()
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET id = ? WHERE id = ?", (noncanonical, task.id)
             )
@@ -1069,7 +1120,7 @@ class LedgerTestCase(unittest.TestCase):
         task = self.ledger.create_task()
         with self.assertRaises(InvalidInput):
             self.ledger.close_task(task.id, "failed", code=marker)
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             stored = connection.execute(
                 "SELECT COUNT(*) FROM task_events WHERE code = ?", (marker,)
             ).fetchone()[0]
@@ -1097,7 +1148,7 @@ class LedgerTestCase(unittest.TestCase):
         task = self.ledger.create_task()
         self.ledger.close_task(task.id, "failed", code="worker_failed")
         marker = "reason_" + uuid.uuid4().hex
-        with sqlite3.connect(str(self.db)) as connection:
+        with _sqlite_connection(self.db) as connection:
             connection.execute(
                 "UPDATE tasks SET terminal_code = ? WHERE id = ?", (marker, task.id)
             )
