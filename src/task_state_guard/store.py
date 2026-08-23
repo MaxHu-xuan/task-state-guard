@@ -39,6 +39,32 @@ Clock = Callable[[], float]
 _POSIX_MODE_SECURITY = os.name == "posix"
 _WINDOWS_PLATFORM = os.name == "nt"
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_SNAPSHOT_WIPE_ZEROES = b"\x00" * (64 * 1024)
+
+
+def _wipe_bytearray(snapshot: Optional[bytearray]) -> None:
+    if snapshot is None:
+        return
+    chunk_size = len(_SNAPSHOT_WIPE_ZEROES)
+    for offset in range(0, len(snapshot), chunk_size):
+        width = min(chunk_size, len(snapshot) - offset)
+        snapshot[offset : offset + width] = _SNAPSHOT_WIPE_ZEROES[:width]
+    snapshot.clear()
+
+
+class _SnapshotConnection(sqlite3.Connection):
+    """Keep deserialized bytes alive, then wipe them after SQLite closes."""
+
+    def retain_snapshot(self, snapshot: bytearray) -> None:
+        self._snapshot_buffer = snapshot
+
+    def close(self) -> None:
+        snapshot = getattr(self, "_snapshot_buffer", None)
+        try:
+            super().close()
+        finally:
+            _wipe_bytearray(snapshot)
+            self._snapshot_buffer = None
 
 
 def _is_link_like(metadata: os.stat_result) -> bool:
@@ -56,6 +82,8 @@ class Ledger:
 
     SCHEMA_VERSION = 2
     _LEGACY_SCHEMA_VERSION = 1
+    _READ_ONLY_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+    _SNAPSHOT_CHUNK_BYTES = 1024 * 1024
     _SCHEMA_OBJECTS = frozenset(
         (
             "schema_meta",
@@ -75,6 +103,7 @@ class Ledger:
         clock: Clock = time.time,
         busy_timeout_ms: int = 5000,
         allow_external_acl: bool = False,
+        read_only: bool = False,
     ) -> None:
         try:
             raw_path = os.fspath(path)
@@ -96,6 +125,8 @@ class Ledger:
             raise InvalidInput("clock must be callable")
         if not isinstance(allow_external_acl, bool):
             raise InvalidInput("allow_external_acl must be bool")
+        if not isinstance(read_only, bool):
+            raise InvalidInput("read_only must be bool")
         if not _POSIX_MODE_SECURITY and not allow_external_acl:
             raise InvalidInput(
                 "platform ACLs cannot be verified; explicit acknowledgement required"
@@ -110,10 +141,11 @@ class Ledger:
         self.path = canonical_parent / lexical_path.name
         self._clock = clock
         self._busy_timeout_ms = busy_timeout_ms
+        self._read_only = read_only
         self._permission_model = (
             "posix_mode" if _POSIX_MODE_SECURITY else "external_acl"
         )
-        self._file_identity = self._prepare_storage_path()
+        self._file_identity = self._prepare_storage_path(read_only=read_only)
         self._initialize()
 
     @staticmethod
@@ -125,7 +157,7 @@ class Ledger:
         if _is_link_like(metadata) or not stat.S_ISDIR(metadata.st_mode):
             raise InvalidInput("database parent must be a real directory")
 
-    def _prepare_parent(self) -> None:
+    def _prepare_parent(self, *, create_missing: bool = True) -> None:
         parent = self.path.parent
         anchor = Path(parent.anchor)
         self._validate_directory(anchor)
@@ -136,6 +168,8 @@ class Ledger:
             try:
                 metadata = current.lstat()
             except FileNotFoundError:
+                if not create_missing:
+                    raise InvalidInput("database parent is unavailable") from None
                 if not _POSIX_MODE_SECURITY:
                     raise InvalidInput(
                         "database parent must be pre-created under external ACL"
@@ -187,12 +221,13 @@ class Ledger:
                 break
             current = current.parent
 
-    def _prepare_storage_path(self) -> Tuple[int, int]:
-        self._prepare_parent()
+    def _prepare_storage_path(self, *, read_only: bool) -> Tuple[int, int]:
+        self._prepare_parent(create_missing=not read_only)
         try:
             existing = self.path.lstat()
         except FileNotFoundError:
-            pass
+            if read_only:
+                raise InvalidInput("read-only database must already exist") from None
         except OSError:
             raise InvalidInput("database file cannot be inspected safely") from None
         else:
@@ -204,7 +239,7 @@ class Ledger:
                 raise InvalidInput(
                     "database file must be a single-link regular file"
                 )
-        flags = os.O_RDWR | os.O_CREAT
+        flags = os.O_RDONLY if read_only else os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         if hasattr(os, "O_CLOEXEC"):
@@ -221,7 +256,12 @@ class Ledger:
                 raise InvalidInput("database file must be a single-link regular file")
             if not metadata.st_ino:
                 raise InvalidInput("database file identity is unavailable")
-            if _POSIX_MODE_SECURITY:
+            if _POSIX_MODE_SECURITY and read_only:
+                if stat.S_IMODE(metadata.st_mode) != 0o600:
+                    raise InvalidInput(
+                        "read-only database permissions must already be private"
+                    )
+            elif _POSIX_MODE_SECURITY:
                 try:
                     os.fchmod(descriptor, 0o600)
                 except (AttributeError, OSError):
@@ -234,7 +274,7 @@ class Ledger:
         finally:
             os.close(descriptor)
 
-    def _secure_sidecar_paths(self) -> None:
+    def _secure_sidecar_paths(self, *, tighten_permissions: bool = True) -> None:
         """Reject aliases and tighten permissions on existing SQLite sidecars."""
 
         for suffix in ("-journal", "-wal", "-shm"):
@@ -261,6 +301,10 @@ class Ledger:
                 _POSIX_MODE_SECURITY
                 and stat.S_IMODE(metadata.st_mode) != 0o600
             ):
+                if not tighten_permissions:
+                    raise StateConflict(
+                        "read-only SQLite sidecar permissions must already be private"
+                    )
                 try:
                     os.chmod(str(sidecar), 0o600, follow_symlinks=False)
                 except FileNotFoundError:
@@ -272,7 +316,7 @@ class Ledger:
                     ) from None
 
     def _verify_storage_path(self) -> None:
-        self._prepare_parent()
+        self._prepare_parent(create_missing=False)
         try:
             metadata = self.path.lstat()
         except OSError:
@@ -286,6 +330,182 @@ class Ledger:
         ):
             raise StateConflict("database file identity changed")
 
+    def _read_only_has_wal_pair(self) -> bool:
+        """Return whether a complete WAL/SHM pair exists, failing on partial state."""
+
+        presence = {}
+        for suffix in ("-journal", "-wal", "-shm"):
+            try:
+                Path(str(self.path) + suffix).lstat()
+                presence[suffix] = True
+            except FileNotFoundError:
+                presence[suffix] = False
+            except OSError:
+                raise StateConflict("SQLite sidecar cannot be inspected safely") from None
+        journal_exists = presence["-journal"]
+        wal_exists = presence["-wal"]
+        shm_exists = presence["-shm"]
+        if journal_exists or wal_exists != shm_exists:
+            raise StateConflict("read-only SQLite sidecar state is incomplete")
+        return wal_exists
+
+    @staticmethod
+    def _snapshot_signature(metadata: os.stat_result) -> Tuple[int, ...]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_nlink,
+            stat.S_IMODE(metadata.st_mode),
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def _read_snapshot_pass(
+        self, *, capture: bool
+    ) -> Tuple[Tuple[int, ...], bytes, bytes, Optional[bytearray]]:
+        """Hash or capture one no-sidecar source pass under identity checks."""
+
+        self._verify_storage_path()
+        if self._read_only_has_wal_pair():
+            raise StateConflict("read-only snapshot requires a closed WAL database")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOINHERIT"):
+            flags |= os.O_NOINHERIT
+        try:
+            descriptor = os.open(str(self.path), flags)
+        except OSError:
+            raise StateConflict("database snapshot cannot be read safely") from None
+        collected = bytearray() if capture else None
+        digest = hashlib.sha256()
+        header = bytearray()
+        total = 0
+        try:
+            before = os.fstat(descriptor)
+            before_signature = self._snapshot_signature(before)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or (before.st_dev, before.st_ino) != self._file_identity
+            ):
+                raise StateConflict("database file identity changed")
+            if before.st_size > self._READ_ONLY_SNAPSHOT_MAX_BYTES:
+                raise StateConflict("read-only database exceeds snapshot limit")
+            while True:
+                chunk = os.read(descriptor, self._SNAPSHOT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > self._READ_ONLY_SNAPSHOT_MAX_BYTES:
+                    raise StateConflict("read-only database exceeds snapshot limit")
+                digest.update(chunk)
+                if len(header) < 20:
+                    header.extend(chunk[: 20 - len(header)])
+                if collected is not None:
+                    collected.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                self._snapshot_signature(after) != before_signature
+                or total != before.st_size
+            ):
+                raise StateConflict("database changed during read-only snapshot")
+        except OSError:
+            _wipe_bytearray(collected)
+            raise StateConflict("database snapshot cannot be read safely") from None
+        except MemoryError:
+            _wipe_bytearray(collected)
+            raise StateConflict("read-only database snapshot is unavailable") from None
+        except BaseException:
+            _wipe_bytearray(collected)
+            raise
+        finally:
+            os.close(descriptor)
+        try:
+            self._verify_storage_path()
+            if self._read_only_has_wal_pair():
+                raise StateConflict("database changed during read-only snapshot")
+        except BaseException:
+            _wipe_bytearray(collected)
+            raise
+        return before_signature, digest.digest(), bytes(header), collected
+
+    def _stable_database_snapshot(self) -> bytearray:
+        """Return stable source bytes only after two matching, sidecar-free passes."""
+
+        snapshot = None
+        try:
+            first_signature, first_digest, first_header, _unused = (
+                self._read_snapshot_pass(capture=False)
+            )
+            second_signature, second_digest, second_header, snapshot = (
+                self._read_snapshot_pass(capture=True)
+            )
+            if (
+                snapshot is None
+                or first_signature != second_signature
+                or first_digest != second_digest
+                or first_header != second_header
+            ):
+                raise StateConflict("database changed during read-only snapshot")
+            if (
+                second_header[:16] != b"SQLite format 3\x00"
+                or second_header[18:20] != b"\x02\x02"
+            ):
+                raise StateConflict("read-only database requires WAL mode")
+            # A sidecar-free WAL database is fully checkpointed, but SQLite
+            # cannot deserialize WAL-format header bytes into an in-memory
+            # database. Normalize only the private snapshot copy to rollback
+            # format; the verified source bytes remain untouched.
+            snapshot[18:20] = b"\x01\x01"
+            return snapshot
+        except BaseException:
+            _wipe_bytearray(snapshot)
+            raise
+
+    @staticmethod
+    def _deserialize_database_snapshot(
+        connection: sqlite3.Connection, snapshot: bytearray
+    ) -> None:
+        deserialize = getattr(connection, "deserialize", None)
+        if not callable(deserialize):
+            raise StateConflict("SQLite snapshot deserialization is unavailable")
+        try:
+            deserialize(snapshot)
+        except (BufferError, MemoryError, sqlite3.Error, TypeError, ValueError):
+            raise StateConflict("SQLite snapshot deserialization failed") from None
+
+    def _connect_stable_snapshot(self) -> sqlite3.Connection:
+        snapshot = self._stable_database_snapshot()
+        connection = None
+        try:
+            connection = sqlite3.connect(
+                ":memory:",
+                isolation_level=None,
+                factory=_SnapshotConnection,
+            )
+            self._deserialize_database_snapshot(connection, snapshot)
+            connection.retain_snapshot(snapshot)
+            snapshot = None
+            return connection
+        except MemoryError:
+            if connection is not None:
+                connection.close()
+            raise StateConflict("read-only database snapshot is unavailable") from None
+        except sqlite3.Error:
+            if connection is not None:
+                connection.close()
+            raise StateConflict("database connection failed") from None
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            raise
+        finally:
+            _wipe_bytearray(snapshot)
+
     def _now(self) -> float:
         try:
             value = float(self._clock())
@@ -296,19 +516,30 @@ class Ledger:
         return value
 
     def _connect(self, *, set_wal: bool = False) -> sqlite3.Connection:
+        if self._read_only and set_wal:
+            raise StateConflict("read-only ledger cannot change journal mode")
         self._verify_storage_path()
-        self._secure_sidecar_paths()
+        self._secure_sidecar_paths(tighten_permissions=not self._read_only)
         try:
-            connection = sqlite3.connect(
-                str(self.path),
-                timeout=max(self._busy_timeout_ms / 1000.0, 0.001),
-                isolation_level=None,
-            )
+            if self._read_only and not self._read_only_has_wal_pair():
+                connection = self._connect_stable_snapshot()
+            else:
+                target = (
+                    self.path.as_uri() + "?mode=ro"
+                    if self._read_only
+                    else str(self.path)
+                )
+                connection = sqlite3.connect(
+                    target,
+                    timeout=max(self._busy_timeout_ms / 1000.0, 0.001),
+                    isolation_level=None,
+                    uri=self._read_only,
+                )
         except sqlite3.Error:
             raise StateConflict("database connection failed") from None
         try:
             self._verify_storage_path()
-            self._secure_sidecar_paths()
+            self._secure_sidecar_paths(tighten_permissions=not self._read_only)
         except BaseException:
             connection.close()
             raise
@@ -322,8 +553,9 @@ class Ledger:
                 journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
                 if str(journal_mode).lower() != "wal":
                     raise StateConflict("SQLite WAL mode is unavailable")
-            connection.execute("PRAGMA synchronous = NORMAL")
-            self._secure_sidecar_paths()
+            if not self._read_only:
+                connection.execute("PRAGMA synchronous = NORMAL")
+            self._secure_sidecar_paths(tighten_permissions=not self._read_only)
             return connection
         except sqlite3.Error:
             connection.close()
@@ -449,10 +681,16 @@ class Ledger:
         return True
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
+    def _transaction(
+        self, *, read_only: bool = False
+    ) -> Iterator[sqlite3.Connection]:
+        if self._read_only and not read_only:
+            raise StateConflict("ledger is read-only")
         connection = self._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE")
+            if read_only:
+                connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             yield connection
             connection.execute("COMMIT")
         except BaseException:
@@ -463,6 +701,27 @@ class Ledger:
             connection.close()
 
     def _initialize(self) -> None:
+        if self._read_only:
+            connection = self._connect()
+            try:
+                journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                if str(journal_mode).lower() not in ("memory", "wal"):
+                    raise StateConflict("read-only database requires WAL mode")
+                if not self._schema_objects(connection):
+                    raise StateConflict("read-only database is not initialized")
+                self._validate_existing_schema(connection)
+                actual_version, _metadata_ok = self._schema_metadata_state(connection)
+                if (
+                    actual_version == self._LEGACY_SCHEMA_VERSION
+                    and not self._legacy_reason_codes_are_safe(connection)
+                ):
+                    raise StateConflict(
+                        "legacy database contains unsafe reason metadata"
+                    )
+            finally:
+                connection.close()
+            return
+
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -1129,7 +1388,10 @@ class Ledger:
         *,
         active_grace_seconds: float,
         delivery_grace_seconds: float,
-    ) -> Dict[str, int]:
+        dry_run: bool = False,
+    ) -> Dict[str, Union[bool, int]]:
+        if not isinstance(dry_run, bool):
+            raise InvalidInput("dry_run must be bool")
         active_grace = validate_nonnegative_number(
             active_grace_seconds, "active_grace_seconds"
         )
@@ -1137,6 +1399,8 @@ class Ledger:
             delivery_grace_seconds, "delivery_grace_seconds"
         )
         report = {
+            "dry_run": dry_run,
+            "applied": not dry_run,
             "active_examined": 0,
             "tasks_timed_out": 0,
             "fresh_active_retained": 0,
@@ -1145,12 +1409,24 @@ class Ledger:
             "deliveries_not_applicable": 0,
             "pending_delivery_retained": 0,
         }
-        with self._transaction() as connection:
-            now = self._now()
-            active_rows = connection.execute(
-                "SELECT * FROM tasks WHERE status IN ('queued','running') ORDER BY created_at, id"
-            ).fetchall()
+        with self._transaction(read_only=dry_run) as connection:
+            active_query = (
+                "SELECT * FROM tasks WHERE status IN ('queued','running') "
+                "ORDER BY created_at, id"
+            )
+            if dry_run:
+                active_rows = connection.execute(active_query).fetchall()
+                # A deferred read transaction fixes its snapshot on the first
+                # read. Sample the clock afterwards so a concurrent heartbeat
+                # cannot appear later than the preview's decision time.
+                now = self._now()
+            else:
+                # Preserve the established apply-mode decision time. Its
+                # BEGIN IMMEDIATE already prevents a concurrent writer race.
+                now = self._now()
+                active_rows = connection.execute(active_query).fetchall()
             report["active_examined"] = len(active_rows)
+            task_transitions: List[Tuple[sqlite3.Row, str]] = []
             for row in active_rows:
                 self._task_from_row(row)
                 status = TaskStatus(row["status"])
@@ -1170,6 +1446,46 @@ class Ledger:
                     now, row["created_at"], row["started_at"], row["updated_at"]
                 )
                 code = "deadline_exceeded" if deadline_expired else "restart_stale"
+                task_transitions.append((row, code))
+                report["tasks_timed_out"] += 1
+
+            pending_rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE delivery_status = 'pending'
+                  AND status IN ('succeeded','failed','timed_out','cancelled')
+                ORDER BY ended_at, id
+                """
+            ).fetchall()
+            pending_candidates = []
+            for row in pending_rows:
+                self._task_from_row(row)
+                pending_candidates.append((row, float(row["ended_at"])))
+            pending_candidates.extend(
+                (row, now) for row, _code in task_transitions
+            )
+            report["pending_delivery_examined"] = len(pending_candidates)
+            delivery_transitions: List[
+                Tuple[sqlite3.Row, DeliveryStatus, str]
+            ] = []
+            for row, ended_at in pending_candidates:
+                if ended_at > now - delivery_grace:
+                    report["pending_delivery_retained"] += 1
+                    continue
+                if bool(row["delivery_required"]):
+                    target = DeliveryStatus.FAILED
+                    code = "delivery_grace_expired"
+                    report["deliveries_failed"] += 1
+                else:
+                    target = DeliveryStatus.NOT_APPLICABLE
+                    code = "internal_task"
+                    report["deliveries_not_applicable"] += 1
+                delivery_transitions.append((row, target, code))
+
+            if dry_run:
+                return report
+
+            for row, code in task_transitions:
                 connection.execute(
                     """
                     UPDATE tasks
@@ -1188,30 +1504,8 @@ class Ledger:
                     now,
                     code,
                 )
-                report["tasks_timed_out"] += 1
 
-            pending_rows = connection.execute(
-                """
-                SELECT * FROM tasks
-                WHERE delivery_status = 'pending'
-                  AND status IN ('succeeded','failed','timed_out','cancelled')
-                ORDER BY ended_at, id
-                """
-            ).fetchall()
-            report["pending_delivery_examined"] = len(pending_rows)
-            for row in pending_rows:
-                self._task_from_row(row)
-                if float(row["ended_at"]) > now - delivery_grace:
-                    report["pending_delivery_retained"] += 1
-                    continue
-                if bool(row["delivery_required"]):
-                    target = DeliveryStatus.FAILED
-                    code = "delivery_grace_expired"
-                    report["deliveries_failed"] += 1
-                else:
-                    target = DeliveryStatus.NOT_APPLICABLE
-                    code = "internal_task"
-                    report["deliveries_not_applicable"] += 1
+            for row, target, code in delivery_transitions:
                 connection.execute(
                     """
                     UPDATE tasks

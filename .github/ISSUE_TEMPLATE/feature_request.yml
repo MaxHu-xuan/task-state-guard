@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a narrowly scoped addition to the public state-ledger contract.
+description: Propose a user outcome within the public task-state ledger boundary.
 title: "[Feature] "
 labels: []
 assignees: []
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        TaskStateGuard records state; it does not schedule, execute, retry, or deliver tasks. Proposals must preserve the privacy-minimal storage and fail-closed filesystem boundaries.
+        Start with the workflow problem and the result you need. TaskStateGuard records and reconciles state; it does not schedule, execute, retry, or deliver tasks. Proposals must preserve privacy-minimal storage and fail-closed filesystem boundaries.
   - type: checkboxes
     id: boundaries
     attributes:
@@ -20,20 +20,21 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: Describe the general public use case without private deployment details.
+      label: Workflow problem
+      description: Describe what an operator or integrator cannot currently determine or reconcile, without private deployment details.
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed public behavior
-      description: Define inputs, outputs, state transitions, failure behavior, and compatibility impact.
+      label: Desired result
+      description: Explain the observable outcome first, then define inputs, outputs, state transitions, failure behavior, and compatibility impact.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
+      description: Include any approach that belongs in the surrounding queue, worker, retry, workflow, or transport layer instead.
     validations:
       required: true

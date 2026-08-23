@@ -1,6 +1,13 @@
-## Summary
+## Problem and outcome
 
-Describe the public behavior or invariant changed by this pull request.
+Describe the user or operator problem, then the observable result of this change.
+
+## State contract
+
+- Task state affected:
+- Delivery state affected:
+- Restart, timeout, preview, or doctor behavior affected:
+- Compatibility impact:
 
 ## Verification
 
@@ -9,6 +16,7 @@ Describe the public behavior or invariant changed by this pull request.
 - [ ] `scripts/privacy_audit.py --self-test` passes.
 - [ ] Package smoke checks pass when packaging or entry points change.
 - [ ] Documentation and `CHANGELOG.md` are updated when the public contract changes.
+- [ ] A dry-run or doctor path remains non-mutating when the change affects observability.
 
 ## Safety
 

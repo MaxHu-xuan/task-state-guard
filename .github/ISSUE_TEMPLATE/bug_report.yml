@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible TaskStateGuard defect using synthetic data only.
+description: Report an incorrect task, delivery, restart-recovery, or doctor result.
 title: "[Bug] "
 labels: []
 assignees: []
@@ -25,6 +25,21 @@ body:
     validations:
       required: true
   - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Choose the result that did not match the documented contract.
+      options:
+        - Task lifecycle or terminal state
+        - Timeout or restart reconciliation
+        - Delivery state
+        - Dry-run preview
+        - Doctor or workflow observability
+        - SQLite, path, or permission safety
+        - Packaging or cross-platform behavior
+    validations:
+      required: true
+  - type: dropdown
     id: operating-system
     attributes:
       label: Operating system
@@ -45,19 +60,20 @@ body:
     id: reproduction
     attributes:
       label: Minimal synthetic reproduction
-      description: Include only the smallest code or commands needed to reproduce the behavior.
+      description: Show the state before the action, the action, and the result using generated values only.
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: Expected behavior
+      label: Expected result
+      description: State which task, delivery, preview, or doctor outcome you expected and why.
     validations:
       required: true
   - type: textarea
     id: observed
     attributes:
-      label: Observed behavior
+      label: Observed result
       description: Summarize the outcome without pasting private paths, values, or database content.
     validations:
       required: true

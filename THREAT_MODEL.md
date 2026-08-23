@@ -37,6 +37,7 @@ client or server.
 | Another OS account swaps POSIX path entries during open | The final parent must be owned by the service account and not group/world writable; writable ancestors must use sticky-directory semantics. |
 | A Windows database inherits a permissive DACL | Windows use fails closed by default. The caller must pre-create a private directory and explicitly acknowledge external ACL enforcement; the opt-in does not verify the DACL. |
 | A prior schema stored arbitrary reason metadata | v1 migration validates reason values and state compatibility and fails closed before upgrading unsafe metadata. |
+| A dry-run mutates storage or races an immutable source | A closed ledger is captured by two bounded identity/timestamp/hash-matching reads and deserialized only into private memory; a live complete WAL/SHM pair uses SQLite read-only locking. Unstable, oversized, incomplete, or unsupported snapshots fail closed, and the decision clock is sampled only after the read snapshot is fixed. |
 
 ## Residual risks and non-goals
 

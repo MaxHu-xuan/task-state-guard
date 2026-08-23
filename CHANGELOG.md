@@ -12,6 +12,12 @@ All notable changes to TaskStateGuard are documented here. The format follows
 - Atomic SQLite transitions, WAL operation, schema fingerprinting, and a
   counts-only consistency doctor.
 - Restart reconciliation for stale running tasks and overdue pending delivery.
+- Read-only restart-reconciliation previews through the Python API and
+  `reconcile --dry-run`, with explicit `dry_run` and `applied` report fields.
+- Full-pipeline read-only ledger opening for CLI previews, including safe
+  non-migrating schema-v1 inspection, stable bounded in-memory snapshots for
+  closed databases, normal SQLite locking for live WAL state, and
+  snapshot-before-clock concurrency.
 - Parent/child task relationships and explicit internal-task delivery semantics.
 - Fixed reason-code registries and value-free CLI error output.
 - Linux and macOS owner/mode enforcement plus explicit externally managed
