@@ -27,6 +27,7 @@ from task_state_guard import (
     reconcile_restart,
 )
 from task_state_guard.cli import main as cli_main
+from task_state_guard.store import _is_link_like
 
 
 _WORKER_STAGES = frozenset(("initialize", "create", "start", "close", "delivery"))
@@ -602,8 +603,10 @@ class LedgerTestCase(unittest.TestCase):
             self.assertIn(getattr(error, "winerror", None), (5, 1314))
             return
 
-        with self.assertRaises(InvalidInput):
-            _ledger(alias)
+        with mock.patch("task_state_guard.store.os.open") as open_database:
+            with self.assertRaises(InvalidInput):
+                _ledger(alias)
+        open_database.assert_not_called()
 
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), before_mode)
         with _sqlite_connection(target) as connection:
@@ -629,9 +632,12 @@ class LedgerTestCase(unittest.TestCase):
                 return symlink_metadata
             return real_lstat(path)
 
-        with mock.patch.object(Path, "lstat", lstat_with_alias):
-            with self.assertRaises(StateConflict):
+        with mock.patch.object(Path, "lstat", lstat_with_alias), mock.patch(
+            "task_state_guard.store.os.open"
+        ) as open_database:
+            with self.assertRaises(InvalidInput):
                 _ledger(alias)
+        open_database.assert_not_called()
 
     def test_observable_windows_reparse_metadata_is_rejected(self):
         alias = Path(self.tempdir.name) / "simulated-reparse.sqlite"
@@ -647,9 +653,19 @@ class LedgerTestCase(unittest.TestCase):
                 return reparse_metadata
             return real_lstat(path)
 
-        with mock.patch.object(Path, "lstat", lstat_with_alias):
-            with self.assertRaises(StateConflict):
+        with mock.patch.object(Path, "lstat", lstat_with_alias), mock.patch(
+            "task_state_guard.store.os.open"
+        ) as open_database:
+            with self.assertRaises(InvalidInput):
                 _ledger(alias)
+        open_database.assert_not_called()
+
+    def test_none_windows_file_attributes_are_not_a_reparse_point(self):
+        metadata = mock.Mock()
+        metadata.st_mode = stat.S_IFREG | 0o600
+        metadata.st_file_attributes = None
+
+        self.assertFalse(_is_link_like(metadata))
 
     def test_observable_windows_reparse_parent_is_rejected(self):
         parent = Path(self.tempdir.name) / "simulated-reparse-parent"
@@ -708,11 +724,22 @@ class LedgerTestCase(unittest.TestCase):
         alias = Path(self.tempdir.name) / "alias.sqlite"
         os.link(str(target), str(alias))
 
-        with self.assertRaises(InvalidInput):
-            _ledger(alias)
+        with mock.patch("task_state_guard.store.os.open") as open_database:
+            with self.assertRaises(InvalidInput):
+                _ledger(alias)
+        open_database.assert_not_called()
 
         self.assertEqual(target.read_bytes(), b"synthetic sentinel")
         self.assertEqual(target.stat().st_nlink, 2)
+
+    def test_nonregular_database_is_rejected_before_open(self):
+        database = Path(self.tempdir.name) / "directory.sqlite"
+        database.mkdir()
+
+        with mock.patch("task_state_guard.store.os.open") as open_database:
+            with self.assertRaises(InvalidInput):
+                _ledger(database)
+        open_database.assert_not_called()
 
     def test_database_path_replacement_is_detected_before_sqlite_reopens(self):
         task = self.ledger.create_task()

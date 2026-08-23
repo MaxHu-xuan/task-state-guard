@@ -44,8 +44,10 @@ _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 def _is_link_like(metadata: os.stat_result) -> bool:
     """Recognize POSIX symlinks and Windows reparse-point aliases."""
 
-    return stat.S_ISLNK(metadata.st_mode) or bool(
-        getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or (
+        isinstance(file_attributes, int)
+        and bool(file_attributes & _WINDOWS_REPARSE_POINT)
     )
 
 
@@ -187,6 +189,21 @@ class Ledger:
 
     def _prepare_storage_path(self) -> Tuple[int, int]:
         self._prepare_parent()
+        try:
+            existing = self.path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise InvalidInput("database file cannot be inspected safely") from None
+        else:
+            if (
+                _is_link_like(existing)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise InvalidInput(
+                    "database file must be a single-link regular file"
+                )
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
