@@ -31,6 +31,8 @@ All notable changes to TaskStateGuard are documented here. The format follows
 
 ### Fixed
 
+- Keep source-archive identity checks fail-closed on Windows without comparing
+  path and open-handle timestamps that have different operating-system meanings.
 - Keep queued tasks unchanged during restart reconciliation even when their
   precomputed deadline has passed; only running tasks are eligible for
   deadline-based timeout transitions.
