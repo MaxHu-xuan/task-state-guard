@@ -53,6 +53,8 @@ All notable changes to TaskStateGuard are documented here. The format follows
   retain local checkout times.
 - Smoke-test the canonical source distribution that is eligible for upload,
   rather than treating the raw setuptools archive as release evidence.
+- Resolve the temporary root before creating an offline-smoke virtual
+  environment, avoiding Windows 8.3-path and long-path identity mismatches.
 
 ### Documentation
 
