@@ -76,27 +76,7 @@ Before a release:
    uses that reviewed toolchain instead of downloading a second, unrecorded
    backend environment.
 
-3. Run the artifact smoke with the same supported interpreter:
-
-   - macOS or Linux:
-
-     ```bash
-     PYTHONDONTWRITEBYTECODE=1 python3 scripts/artifact_smoke.py dist
-     ```
-
-   - Windows PowerShell:
-
-     ```powershell
-     $env:PYTHONDONTWRITEBYTECODE = "1"
-     py -3 .\scripts\artifact_smoke.py .\dist
-     ```
-
-   Verify the extracted-sdist audit, offline wheel install, module and console
-   entry points, and synthetic task lifecycle. `artifact_smoke.py` creates an
-   isolated temporary environment, installs the wheel there, and invokes
-   `scripts/install_smoke.py` with that environment's interpreter. Do not run
-   the install-smoke helper directly against an uninstalled checkout.
-4. Never upload the raw setuptools sdist: its tar headers may retain the build
+3. Never upload the raw setuptools sdist: its tar headers may retain the build
    account and local file times. Create the upload candidate with the bundled
    canonicalizer, using the documented project epoch:
 
@@ -118,12 +98,83 @@ Before a release:
    paths, and oversized input. It sets uid/gid to zero, removes user/group and
    optional gzip metadata, fixes member times and modes, and verifies that file
    contents are unchanged. Build twice and compare canonical artifact hashes.
+4. Stage the wheel together with the canonical sdist, then run the artifact
+   smoke against that exact two-file upload set. Do not smoke the raw sdist from
+   `dist` as release evidence.
+
+   - macOS or Linux:
+
+     ```bash
+     mkdir staging-dist
+     cp dist/*.whl staging-dist/
+     cp canonical-dist/*.tar.gz staging-dist/
+     PYTHONDONTWRITEBYTECODE=1 python3 scripts/artifact_smoke.py staging-dist
+     ```
+
+   - Windows PowerShell:
+
+     ```powershell
+     New-Item -ItemType Directory -Path .\staging-dist -ErrorAction Stop
+     Copy-Item .\dist\*.whl .\staging-dist\ -ErrorAction Stop
+     Copy-Item .\canonical-dist\*.tar.gz .\staging-dist\ -ErrorAction Stop
+     $env:PYTHONDONTWRITEBYTECODE = "1"
+     py -3 .\scripts\artifact_smoke.py .\staging-dist
+     ```
+
+   Verify the extracted-sdist audit, offline wheel install, module and console
+   entry points, and synthetic task lifecycle. `artifact_smoke.py` creates an
+   isolated temporary environment, installs the wheel there, and invokes
+   `scripts/install_smoke.py` with that environment's interpreter. Do not run
+   the install-smoke helper directly against an uninstalled checkout.
 5. Review every distributed file, package metadata, the changelog, security
    policy, threat model, SHA-256 checksums, and SBOM. Build from two separate
    clean candidate directories and require matching wheel and canonical-sdist
    SHA-256 digests. Record the SBOM generator and version, and reject local
    paths or build-account identity in either artifact metadata or SBOM.
 6. Confirm the final Linux, macOS, and Windows CI matrix is green.
+
+## Trusted Publishing to PyPI
+
+PyPI publication is tokenless and runs only from
+`.github/workflows/publish-pypi.yml` after a non-draft, non-prerelease GitHub
+release is published. Configure PyPI's publisher with owner `MaxHu-xuan`,
+repository `task-state-guard`, workflow filename `publish-pypi.yml`, and GitHub
+environment `pypi`. Configure that environment with a required reviewer and an
+exact release-tag deployment rule. If a second trusted reviewer is available,
+also prevent self-review; enabling that option with only one reviewer would
+make publication impossible.
+
+Prepare the GitHub release as a draft and attach exactly these five externally
+reviewed assets before publishing it:
+
+- `SOURCE_COMMIT`
+- `SHA256SUMS`
+- `task_state_guard-0.1.0.cdx.json`
+- `task_state_guard-0.1.0-py3-none-any.whl`
+- `task_state_guard-0.1.0.tar.gz`
+
+`SOURCE_COMMIT` contains the exact tagged commit. `SHA256SUMS` contains only the
+wheel, canonical sdist, and SBOM digests. Keep digest values in those external
+release records rather than copying them into documentation, pull-request
+discussion, or workflow source. The verification job rejects any other asset
+set, binds tag and package version to `SOURCE_COMMIT`, requires the tag to be in
+`main` history, requires the running workflow revision to equal the tagged
+commit, reruns the values-free source and canonical-archive gates, and passes
+only the wheel and canonical sdist to the protected publishing job.
+
+The `publish` job has only `id-token: write`; it receives no PyPI password or
+long-lived API token, checks out no source, builds nothing, and runs no project
+code. Never add `PYPI_TOKEN`, a password input, `contents: write`, a reusable
+workflow wrapper, or a second package-index invocation to this job. PyPI
+Trusted Publishing also emits the supported package attestations.
+
+PyPI uploads of multiple files are not atomic. Keep `skip-existing` disabled so
+a duplicate or partial publication is visible. If one distribution uploads and
+the other fails, do not blindly rerun and do not claim success. First compare
+the public PyPI file hashes with the approved `SHA256SUMS`; only an existing
+byte-for-byte match may be retained. Recover a missing file through a separate,
+explicitly reviewed action, and treat any mismatch as a release incident. PyPI
+does not permit replacing an already published file.
 
 Do not upload databases, SQLite sidecars, task identifiers, payload
 fingerprints, credentials, local paths, logs, build caches, or private test

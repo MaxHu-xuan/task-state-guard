@@ -32,12 +32,12 @@ comes from the exact candidate tree.
 
 - [ ] Set `SOURCE_DATE_EPOCH=946684800` for every candidate build.
 - [ ] Build wheel and raw sdist twice from separate clean candidate directories.
-- [ ] Run the platform-specific artifact-smoke command from `RELEASING.md`
-  against each build and review its values-free result, including its isolated
-  offline install smoke.
 - [ ] Run the platform-specific canonicalizer self-test from `RELEASING.md`.
 - [ ] Canonicalize both raw sdists, compare their SHA-256 digests, and confirm
   byte-for-byte reproducibility.
+- [ ] Stage each wheel with its matching canonical sdist, run the
+  platform-specific artifact-smoke command from `RELEASING.md`, and review its
+  values-free result, including its isolated offline install smoke.
 - [ ] Confirm all wheel member timestamps use the public project epoch and both
   wheel builds have the same SHA-256 digest.
 - [ ] Inspect canonical tar ownership, modes, timestamps, PAX headers, gzip
@@ -55,6 +55,9 @@ comes from the exact candidate tree.
   private DACL and does not claim the library verifies it.
 - [ ] Obtain explicit human approval for the exact wheel, canonical sdist,
   checksums, SBOM, release notes, and target repositories.
+- [ ] Confirm the GitHub Release contains exactly `SOURCE_COMMIT`, `SHA256SUMS`,
+  the reviewed SBOM, wheel, and canonical sdist, and that the protected `pypi`
+  environment has its required reviewer and exact release-tag rule.
 - [ ] Only after approval, create tag `v0.1.0`, publish the GitHub release, and
   perform any separately approved package-index upload.
 

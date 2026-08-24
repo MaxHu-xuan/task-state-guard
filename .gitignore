@@ -19,6 +19,8 @@ Desktop.ini
 htmlcov/
 build/
 dist/
+canonical-dist/
+staging-dist/
 *.egg-info/
 *.whl
 .venv/

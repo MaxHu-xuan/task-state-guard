@@ -97,5 +97,21 @@ jobs:
         run: python -m build --no-isolation
       - name: Canonicalize and verify the source distribution
         run: python scripts/canonicalize_sdist.py --dist-dir dist --output-dir canonical-dist --source-date-epoch 946684800
-      - name: Inspect, audit, install, and smoke-test artifacts
-        run: python scripts/artifact_smoke.py dist
+      - name: Stage only publishable distributions
+        shell: python
+        run: |
+          import shutil
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          sdists = sorted(Path("canonical-dist").glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sdists) != 1:
+              raise SystemExit("artifact staging: unexpected artifact set")
+          destination = Path("staging-dist")
+          destination.mkdir()
+          for source in (*wheels, *sdists):
+              target = destination / source.name
+              shutil.copyfile(source, target)
+              target.chmod(0o644)
+      - name: Inspect, audit, install, and smoke-test publishable artifacts
+        run: python scripts/artifact_smoke.py staging-dist
