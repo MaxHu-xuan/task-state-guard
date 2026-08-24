@@ -116,6 +116,95 @@ def _metadata_identity(metadata: os.stat_result) -> Tuple[int, int, int, int, in
     )
 
 
+def _object_identity(metadata: os.stat_result) -> Tuple[int, int, int]:
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _readonly_flags() -> int:
+    flags = os.O_RDONLY
+    flags |= int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_CLOEXEC", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    return flags
+
+
+def _open_readonly(path: Path) -> int:
+    try:
+        return os.open(path, _readonly_flags())
+    except OSError as exc:
+        raise ArchiveError("input archive could not be opened safely") from exc
+
+
+def _ensure_path_matches_descriptor(
+    path: Path,
+    descriptor: int,
+    expected_path_identity: Tuple[int, int, int, int, int, int],
+    message: str,
+) -> None:
+    """Recheck a path and its descriptor without comparing unlike timestamps.
+
+    Windows path and handle stat calls expose different st_ctime meanings. The
+    initial object-ID check binds the path to the primary descriptor; this
+    second handle check preserves that binding through each path recheck.
+    """
+
+    _absolute_without_links(path)
+    try:
+        path_metadata = path.lstat()
+    except OSError as exc:
+        raise ArchiveError(message) from exc
+    if (
+        _is_link_like(path_metadata)
+        or not stat.S_ISREG(path_metadata.st_mode)
+        or _metadata_identity(path_metadata) != expected_path_identity
+    ):
+        raise ArchiveError(message)
+    try:
+        verifier = _open_readonly(path)
+    except ArchiveError as exc:
+        raise ArchiveError(message) from exc
+    try:
+        source_metadata = os.fstat(descriptor)
+        verifier_metadata = os.fstat(verifier)
+        if (
+            _is_link_like(source_metadata)
+            or _is_link_like(verifier_metadata)
+            or not stat.S_ISREG(source_metadata.st_mode)
+            or not stat.S_ISREG(verifier_metadata.st_mode)
+        ):
+            raise ArchiveError(message)
+        if os.name == "nt" and (
+            not source_metadata.st_dev
+            or not source_metadata.st_ino
+            or not verifier_metadata.st_dev
+            or not verifier_metadata.st_ino
+        ):
+            raise ArchiveError(message)
+        _absolute_without_links(path)
+        try:
+            rechecked_metadata = path.lstat()
+        except OSError as exc:
+            raise ArchiveError(message) from exc
+        if (
+            _is_link_like(rechecked_metadata)
+            or not stat.S_ISREG(rechecked_metadata.st_mode)
+            or _metadata_identity(rechecked_metadata) != expected_path_identity
+        ):
+            raise ArchiveError(message)
+        try:
+            matches = os.path.sameopenfile(descriptor, verifier)
+        except (OSError, ValueError) as exc:
+            raise ArchiveError(message) from exc
+        if not matches:
+            raise ArchiveError(message)
+    finally:
+        os.close(verifier)
+
+
 def _validate_single_gzip(stream) -> None:
     try:
         stream.seek(0)
@@ -175,15 +264,10 @@ def _read_members(source: Path) -> Tuple[list[Tuple[tarfile.TarInfo, bytes]], Di
         raise ArchiveError("input must be one regular file")
     if before_metadata.st_size > MAX_GZIP_BYTES:
         raise ArchiveError("input gzip file is larger than the accepted limit")
+    if os.name == "nt" and (not before_metadata.st_dev or not before_metadata.st_ino):
+        raise ArchiveError("input archive has no stable file identity")
     before_identity = _metadata_identity(before_metadata)
-    flags = os.O_RDONLY
-    flags |= int(getattr(os, "O_BINARY", 0))
-    flags |= int(getattr(os, "O_CLOEXEC", 0))
-    flags |= int(getattr(os, "O_NOFOLLOW", 0))
-    try:
-        descriptor = os.open(source, flags)
-    except OSError as exc:
-        raise ArchiveError("input archive could not be opened safely") from exc
+    descriptor = _open_readonly(source)
     try:
         stream = os.fdopen(descriptor, "rb")
     except OSError:
@@ -192,8 +276,23 @@ def _read_members(source: Path) -> Tuple[list[Tuple[tarfile.TarInfo, bytes]], Di
     with stream:
         opened_metadata = os.fstat(stream.fileno())
         opened_identity = _metadata_identity(opened_metadata)
-        if not stat.S_ISREG(opened_metadata.st_mode) or opened_identity != before_identity:
+        if (
+            _is_link_like(opened_metadata)
+            or not stat.S_ISREG(opened_metadata.st_mode)
+            or opened_metadata.st_size > MAX_GZIP_BYTES
+            or _object_identity(opened_metadata) != _object_identity(before_metadata)
+            or (
+                os.name == "nt"
+                and (not opened_metadata.st_dev or not opened_metadata.st_ino)
+            )
+        ):
             raise ArchiveError("input archive identity changed before it was opened")
+        _ensure_path_matches_descriptor(
+            source,
+            stream.fileno(),
+            before_identity,
+            "input archive identity changed before it was opened",
+        )
         _validate_single_gzip(stream)
         try:
             archive = tarfile.open(fileobj=stream, mode="r:gz")
@@ -240,13 +339,12 @@ def _read_members(source: Path) -> Tuple[list[Tuple[tarfile.TarInfo, bytes]], Di
                 raise ArchiveError("archive member count is outside the accepted range")
         if _metadata_identity(os.fstat(stream.fileno())) != opened_identity:
             raise ArchiveError("input archive changed while it was being read")
-    _absolute_without_links(source)
-    try:
-        after_metadata = source.lstat()
-    except OSError as exc:
-        raise ArchiveError("input archive metadata could not be rechecked") from exc
-    if _is_link_like(after_metadata) or _metadata_identity(after_metadata) != before_identity:
-        raise ArchiveError("input archive identity changed while it was being read")
+        _ensure_path_matches_descriptor(
+            source,
+            stream.fileno(),
+            before_identity,
+            "input archive identity changed while it was being read",
+        )
     if len(roots) != 1:
         raise ArchiveError("source distribution must contain exactly one top-level directory")
     root = next(iter(roots))
@@ -415,6 +513,99 @@ def self_test() -> None:
         canonicalize(raw, result_b, 946684800)
         if result_a.read_bytes() != result_b.read_bytes():
             raise ArchiveError("canonical outputs are not byte-for-byte reproducible")
+
+        same_metadata = root / "same-metadata.tar.gz"
+        same_metadata.write_bytes(raw.read_bytes())
+        raw_metadata = raw.stat()
+        os.utime(
+            same_metadata,
+            ns=(raw_metadata.st_atime_ns, raw_metadata.st_mtime_ns),
+        )
+        identity_descriptor = _open_readonly(raw)
+        try:
+            _ensure_path_matches_descriptor(
+                raw,
+                identity_descriptor,
+                _metadata_identity(raw.lstat()),
+                "matching source descriptor was rejected",
+            )
+            try:
+                _ensure_path_matches_descriptor(
+                    same_metadata,
+                    identity_descriptor,
+                    _metadata_identity(raw.lstat()),
+                    "same-metadata replacement was rejected",
+                )
+            except ArchiveError:
+                pass
+            else:
+                raise ArchiveError("same-metadata replacement was not rejected")
+        finally:
+            os.close(identity_descriptor)
+
+        swap_source = root / "swap-source.tar.gz"
+        swap_replacement = root / "swap-replacement.tar.gz"
+        swap_output = root / "swap-output.tar.gz"
+        for candidate in (swap_source, swap_replacement):
+            candidate.write_bytes(raw.read_bytes())
+            os.utime(
+                candidate,
+                ns=(raw_metadata.st_atime_ns, raw_metadata.st_mtime_ns),
+            )
+        original_open_readonly = _open_readonly
+        swap_done = False
+
+        def swapping_open(path: Path) -> int:
+            nonlocal swap_done
+            if path == swap_source and not swap_done:
+                swap_done = True
+                os.replace(swap_replacement, swap_source)
+            return original_open_readonly(path)
+
+        globals()["_open_readonly"] = swapping_open
+        try:
+            try:
+                canonicalize(swap_source, swap_output, 946684800)
+            except ArchiveError:
+                pass
+            else:
+                raise ArchiveError("pre-open source replacement was not rejected")
+        finally:
+            globals()["_open_readonly"] = original_open_readonly
+        if not swap_done or swap_output.exists():
+            raise ArchiveError("pre-open source replacement test was incomplete")
+
+        restored_source = root / "restored-source.tar.gz"
+        restored_replacement = root / "restored-replacement.tar.gz"
+        restored_output = root / "restored-output.tar.gz"
+        for candidate in (restored_source, restored_replacement):
+            candidate.write_bytes(raw.read_bytes())
+            os.utime(
+                candidate,
+                ns=(raw_metadata.st_atime_ns, raw_metadata.st_mtime_ns),
+            )
+        original_open_readonly = _open_readonly
+        wrong_descriptor_opened = False
+
+        def opening_restored_replacement(path: Path) -> int:
+            nonlocal wrong_descriptor_opened
+            if path == restored_source and not wrong_descriptor_opened:
+                wrong_descriptor_opened = True
+                return original_open_readonly(restored_replacement)
+            return original_open_readonly(path)
+
+        globals()["_open_readonly"] = opening_restored_replacement
+        try:
+            try:
+                canonicalize(restored_source, restored_output, 946684800)
+            except ArchiveError:
+                pass
+            else:
+                raise ArchiveError("restored source replacement was not rejected")
+        finally:
+            globals()["_open_readonly"] = original_open_readonly
+        if not wrong_descriptor_opened or restored_output.exists():
+            raise ArchiveError("restored source replacement test was incomplete")
 
         for index in (8, 9):
             tampered = root / f"tampered-{index}.tar.gz"
