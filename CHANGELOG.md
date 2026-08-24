@@ -4,7 +4,7 @@ All notable changes to TaskStateGuard are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-08-25
 
 ### Added
 
@@ -30,6 +30,9 @@ All notable changes to TaskStateGuard are documented here. The format follows
   ownership metadata, rejects unsafe members, and verifies unchanged content.
 - A deterministic, fully synthetic preview/apply/idempotent/doctor demo that
   creates and removes its SQLite ledger at runtime.
+- A release-asset gate and tokenless PyPI Trusted Publishing workflow that
+  binds the public tag, source commit, checksums, SBOM, wheel, and canonical
+  sdist before an environment-approved upload.
 
 ### Fixed
 
@@ -48,11 +51,15 @@ All notable changes to TaskStateGuard are documented here. The format follows
   valid `RECORD` cannot conceal package-semantic changes.
 - Fix release timestamps to a public project epoch so wheel metadata does not
   retain local checkout times.
+- Smoke-test the canonical source distribution that is eligible for upload,
+  rather than treating the raw setuptools archive as release evidence.
 
 ### Documentation
 
 - Add answer-first English and Chinese guidance for agent restart recovery,
   SQLite task reconciliation, delivery acknowledgement, platform boundaries,
   and common integration questions.
-- Add a three-project chooser, platform-specific demo commands, draft v0.1.0
+- Add a three-project chooser, platform-specific demo commands, dated v0.1.0
   release notes, and an explicit candidate checklist.
+- Document the five-file GitHub Release allowlist, external checksum records,
+  least-privilege OIDC publication, and fail-visible partial-upload recovery.

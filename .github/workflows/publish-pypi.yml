@@ -1,0 +1,408 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types:
+      - published
+
+permissions: {}
+
+concurrency:
+  group: task-state-guard-pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify_release_assets:
+    name: Verify reviewed release assets
+    if: >-
+      github.repository == 'MaxHu-xuan/task-state-guard' &&
+      github.event.release.draft == false &&
+      github.event.release.prerelease == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUTF8: "1"
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      SOURCE_DATE_EPOCH: "946684800"
+    steps:
+      - name: Validate release event
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release asset verification: invalid release tag" >&2
+            exit 1
+          fi
+
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Bind tag, version, and protected main history
+        shell: bash
+        run: |
+          set -euo pipefail
+          tagged_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+          checked_out_commit="$(git rev-parse --verify HEAD)"
+          if [[ "$GITHUB_REF" != "refs/tags/${RELEASE_TAG}" ]]; then
+            echo "release asset verification: release reference mismatch" >&2
+            exit 1
+          fi
+          if [[ "$tagged_commit" != "$GITHUB_SHA" || "$checked_out_commit" != "$GITHUB_SHA" ]]; then
+            echo "release asset verification: tag identity mismatch" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_WORKFLOW_SHA:-}" != "$GITHUB_SHA" ]]; then
+            echo "release asset verification: workflow revision mismatch" >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+            echo "release asset verification: main reference missing" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "release asset verification: tag is not in main history" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          with Path("pyproject.toml").open("rb") as stream:
+              version = tomllib.load(stream)["project"]["version"]
+          if tag != f"v{version}":
+              raise SystemExit("release asset verification: version mismatch")
+          PY
+
+      - name: Audit the exact tagged source
+        run: |
+          python scripts/privacy_audit.py
+          python scripts/privacy_audit.py --self-test
+          python scripts/canonicalize_sdist.py --self-test
+
+      - name: Download the exact public release asset allowlist
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          expected = {
+              "SOURCE_COMMIT": 100,
+              "SHA256SUMS": 4096,
+              f"task_state_guard-{version}.cdx.json": 1024 * 1024,
+              f"task_state_guard-{version}-py3-none-any.whl": 16 * 1024 * 1024,
+              f"task_state_guard-{version}.tar.gz": 16 * 1024 * 1024,
+          }
+          event = json.loads(
+              Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")
+          )
+          if event.get("action") != "published":
+              raise SystemExit("release bundle: event is not published")
+          release = event.get("release")
+          if not isinstance(release, dict):
+              raise SystemExit("release bundle: release payload missing")
+          if release.get("tag_name") != os.environ["RELEASE_TAG"]:
+              raise SystemExit("release bundle: release tag mismatch")
+          assets = release.get("assets")
+          if not isinstance(assets, list) or len(assets) != len(expected):
+              raise SystemExit("release bundle: asset count mismatch")
+          if any(not isinstance(asset, dict) for asset in assets):
+              raise SystemExit("release bundle: malformed asset record")
+          names = [asset.get("name") for asset in assets]
+          if any(not isinstance(name, str) for name in names):
+              raise SystemExit("release bundle: malformed asset name")
+          if len(names) != len(set(names)) or set(names) != set(expected):
+              raise SystemExit("release bundle: asset allowlist mismatch")
+
+          declared_total = 0
+          for asset in assets:
+              name = asset["name"]
+              size = asset.get("size")
+              if asset.get("state") != "uploaded":
+                  raise SystemExit("release bundle: incomplete asset rejected")
+              if not isinstance(size, int) or not 0 < size <= expected[name]:
+                  raise SystemExit("release bundle: invalid asset size")
+              declared_total += size
+          if declared_total > 34 * 1024 * 1024:
+              raise SystemExit("release bundle: total size limit exceeded")
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(
+                  self, request, file_pointer, code, message, headers, new_url
+              ):
+                  return None
+
+          token = os.environ.get("GITHUB_TOKEN")
+          if not token:
+              raise SystemExit("release bundle: GitHub token unavailable")
+          repository = os.environ["GITHUB_REPOSITORY"]
+          api_path = f"/repos/{repository}/releases/assets/"
+          opener = urllib.request.build_opener(NoRedirect)
+          destination = Path("release-assets")
+          destination.mkdir(mode=0o700)
+
+          for asset in sorted(assets, key=lambda item: item["name"]):
+              name = asset["name"]
+              api_url = asset.get("url")
+              try:
+                  parsed = urllib.parse.urlparse(api_url or "")
+                  invalid_api_url = (
+                      parsed.scheme != "https"
+                      or parsed.hostname != "api.github.com"
+                      or parsed.username is not None
+                      or parsed.password is not None
+                      or parsed.port is not None
+                      or parsed.query
+                      or parsed.fragment
+                      or re.fullmatch(
+                          re.escape(api_path) + r"[0-9]+", parsed.path
+                      )
+                      is None
+                  )
+              except (TypeError, ValueError):
+                  invalid_api_url = True
+              if invalid_api_url:
+                  raise SystemExit("release bundle: invalid asset API URL")
+              request = urllib.request.Request(
+                  api_url,
+                  headers={
+                      "Accept": "application/octet-stream",
+                      "Authorization": f"Bearer {token}",
+                      "User-Agent": "task-state-guard-release-gate",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              response = None
+              try:
+                  response = opener.open(request, timeout=60)
+              except urllib.error.HTTPError as error:
+                  if error.code not in {301, 302, 303, 307, 308}:
+                      error.close()
+                      raise SystemExit("release bundle: asset download failed") from None
+                  location = error.headers.get("Location")
+                  error.close()
+                  try:
+                      redirect = urllib.parse.urlparse(location or "")
+                      invalid_redirect = (
+                          redirect.scheme != "https"
+                          or redirect.hostname is None
+                          or not redirect.hostname.endswith(
+                              ".githubusercontent.com"
+                          )
+                          or redirect.username is not None
+                          or redirect.password is not None
+                          or redirect.port is not None
+                      )
+                  except (TypeError, ValueError):
+                      invalid_redirect = True
+                  if invalid_redirect:
+                      raise SystemExit("release bundle: unsafe asset redirect")
+                  try:
+                      response = opener.open(
+                          urllib.request.Request(
+                              location,
+                              headers={
+                                  "User-Agent": "task-state-guard-release-gate"
+                              },
+                          ),
+                          timeout=60,
+                      )
+                  except (OSError, urllib.error.HTTPError, urllib.error.URLError):
+                      raise SystemExit("release bundle: asset download failed") from None
+              except (OSError, urllib.error.URLError):
+                  raise SystemExit("release bundle: asset download failed") from None
+              try:
+                  data = response.read(expected[name] + 1)
+              except OSError:
+                  raise SystemExit("release bundle: asset download failed") from None
+              finally:
+                  response.close()
+              if len(data) != asset["size"] or len(data) > expected[name]:
+                  raise SystemExit("release bundle: downloaded size mismatch")
+              target = destination / name
+              with target.open("xb") as stream:
+                  stream.write(data)
+              target.chmod(0o600)
+
+      - name: Verify asset allowlist, commit, checksums, and SBOM identity
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path("release-assets")
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          wheel_name = f"task_state_guard-{version}-py3-none-any.whl"
+          sdist_name = f"task_state_guard-{version}.tar.gz"
+          sbom_name = f"task_state_guard-{version}.cdx.json"
+          expected_assets = {
+              "SOURCE_COMMIT",
+              "SHA256SUMS",
+              wheel_name,
+              sdist_name,
+              sbom_name,
+          }
+          maximum_bytes = {
+              "SOURCE_COMMIT": 100,
+              "SHA256SUMS": 4096,
+              wheel_name: 16 * 1024 * 1024,
+              sdist_name: 16 * 1024 * 1024,
+              sbom_name: 1024 * 1024,
+          }
+          entries = list(root.iterdir())
+          if len(entries) != len(expected_assets) or {path.name for path in entries} != expected_assets:
+              raise SystemExit("release asset verification: asset allowlist mismatch")
+          for path in entries:
+              metadata = path.lstat()
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit("release asset verification: non-regular asset")
+              if metadata.st_size > maximum_bytes[path.name]:
+                  raise SystemExit("release asset verification: oversized asset")
+
+          source_commit = (root / "SOURCE_COMMIT").read_text(encoding="ascii")
+          if not re.fullmatch(r"[0-9a-f]{40}\n", source_commit):
+              raise SystemExit("release asset verification: invalid source commit record")
+          if source_commit.removesuffix("\n") != os.environ["GITHUB_SHA"]:
+              raise SystemExit("release asset verification: source commit mismatch")
+
+          artifact_names = {wheel_name, sdist_name, sbom_name}
+          checksum_text = (root / "SHA256SUMS").read_text(encoding="ascii")
+          if not checksum_text.endswith("\n"):
+              raise SystemExit("release asset verification: invalid checksum record")
+          observed = {}
+          for line in checksum_text.splitlines():
+              match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9_.-]+)", line)
+              if match is None or match.group(2) in observed:
+                  raise SystemExit("release asset verification: invalid checksum record")
+              observed[match.group(2)] = match.group(1)
+          if set(observed) != artifact_names:
+              raise SystemExit("release asset verification: checksum allowlist mismatch")
+          for name, expected_digest in observed.items():
+              digest = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if digest != expected_digest:
+                  raise SystemExit("release asset verification: checksum mismatch")
+
+          try:
+              sbom = json.loads((root / sbom_name).read_text(encoding="utf-8"))
+              component = sbom["metadata"]["component"]
+          except (KeyError, TypeError, UnicodeError, ValueError):
+              raise SystemExit("release asset verification: invalid SBOM") from None
+          if (
+              sbom.get("bomFormat") != "CycloneDX"
+              or sbom.get("specVersion") != "1.6"
+              or component.get("name") != "task-state-guard"
+              or component.get("version") != version
+          ):
+              raise SystemExit("release asset verification: SBOM identity mismatch")
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as stream:
+              stream.write("## Verified release assets\n\n")
+              stream.write(f"- Source commit: `{source_commit.strip()}`\n")
+              for name in sorted(observed):
+                  stream.write(f"- `{name}`: `{observed[name]}`\n")
+
+      - name: Prove that the reviewed sdist is canonical
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir canonical-check
+          python scripts/canonicalize_sdist.py \
+            "release-assets/task_state_guard-${version}.tar.gz" \
+            "canonical-check/task_state_guard-${version}.tar.gz" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
+          if ! cmp -s \
+            "release-assets/task_state_guard-${version}.tar.gz" \
+            "canonical-check/task_state_guard-${version}.tar.gz"; then
+            echo "release asset verification: source archive is not canonical" >&2
+            exit 1
+          fi
+
+      - name: Stage only publishable distributions
+        shell: python
+        run: |
+          import os
+          import shutil
+          from pathlib import Path
+
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          source = Path("release-assets")
+          destination = Path("staging-dist")
+          destination.mkdir()
+          names = (
+              f"task_state_guard-{version}-py3-none-any.whl",
+              f"task_state_guard-{version}.tar.gz",
+          )
+          for name in names:
+              target = destination / name
+              shutil.copyfile(source / name, target)
+              target.chmod(0o644)
+
+      - name: Inspect, install, and smoke-test reviewed distributions
+        run: python scripts/artifact_smoke.py staging-dist
+
+      - name: Upload verified PyPI distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: task-state-guard-pypi-${{ github.sha }}
+          path: staging-dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  publish:
+    name: Publish reviewed distributions
+    needs:
+      - verify_release_assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/task-state-guard
+    permissions:
+      id-token: write
+    steps:
+      - name: Download verified distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: task-state-guard-pypi-${{ github.sha }}
+          path: dist/
+          digest-mismatch: error
+
+      - name: Publish to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          verify-metadata: true
+          skip-existing: false
+          verbose: false
+          print-hash: true
+          attestations: true

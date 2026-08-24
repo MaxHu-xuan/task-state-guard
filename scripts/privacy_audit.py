@@ -41,8 +41,10 @@ RESIDUE_DIRECTORIES = frozenset(
         ".venv",
         "__pycache__",
         "build",
+        "canonical-dist",
         "dist",
         "htmlcov",
+        "staging-dist",
     )
 )
 DATA_SUFFIXES = frozenset(
@@ -138,6 +140,7 @@ REPOSITORY_REQUIRED_FILES = (
     ".github/dependabot.yml",
     ".github/PULL_REQUEST_TEMPLATE.md",
     ".github/workflows/ci.yml",
+    ".github/workflows/publish-pypi.yml",
     ".gitignore",
 )
 NETWORK_OR_TELEMETRY_MODULES = frozenset(
@@ -404,10 +407,14 @@ def _metadata_checks(
             r'.\.venv\Scripts\python.exe -m pip install "build==1.3.0" "setuptools==77.0.3" "wheel==0.46.2"',
             "python -m build --no-isolation",
             r".\.venv\Scripts\python.exe -m build --no-isolation",
-            "python3 scripts/artifact_smoke.py dist",
-            r"py -3 .\scripts\artifact_smoke.py .\dist",
+            "python3 scripts/artifact_smoke.py staging-dist",
+            r"py -3 .\scripts\artifact_smoke.py .\staging-dist",
             "python3 scripts/canonicalize_sdist.py --self-test",
             r"py -3 .\scripts\canonicalize_sdist.py --self-test",
+            ".github/workflows/publish-pypi.yml",
+            "environment `pypi`",
+            "`id-token: write`",
+            "Keep `skip-existing` disabled",
             "`scripts/install_smoke.py` with that environment's interpreter",
             "$previousPythonPath =",
             "Remove-Item Env:PYTHONPATH",

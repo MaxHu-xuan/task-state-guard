@@ -1,7 +1,6 @@
-# TaskStateGuard v0.1.0 Release Notes (Draft)
+# TaskStateGuard v0.1.0 Release Notes
 
-Status: release candidate material only. Version `0.1.0` has not been tagged or
-published by this document.
+Release date: 2026-08-25.
 
 ## Why TaskStateGuard
 
@@ -27,6 +26,9 @@ consistency doctor.
   recheck, and `doctor` without reading local task data.
 - Cross-platform tests, values-free privacy auditing, offline install smoke
   tests, strict artifact inspection, and reproducible canonical sdist tooling.
+- A five-file GitHub Release gate that binds the source commit, checksums,
+  CycloneDX SBOM, wheel, and canonical sdist before tokenless PyPI Trusted
+  Publishing can enter its protected environment.
 
 ## Supported environments
 
@@ -51,8 +53,17 @@ The schema has no field for prompts, messages, task bodies, filesystem paths,
 or free-form exception text. The optional payload SHA-256 fingerprint remains
 correlatable pseudonymous metadata and can be omitted.
 
-## Review before release
+## Release integrity
 
 Use [RELEASE_CHECKLIST_v0.1.0.md](RELEASE_CHECKLIST_v0.1.0.md) for the exact
-candidate gate. Only a canonical sdist and reviewed wheel may become release
-assets; the raw setuptools sdist must not be uploaded.
+candidate gate. The GitHub Release contains the external `SOURCE_COMMIT` and
+`SHA256SUMS` records alongside the SBOM, reviewed wheel, and canonical sdist;
+digest values are intentionally not duplicated in this document. The raw
+setuptools sdist must not be uploaded.
+
+PyPI publication uses GitHub OIDC and the protected `pypi` environment. The
+publishing job has no long-lived package-index token, does not build or check
+out source, and receives only the verified wheel and canonical sdist. A partial
+two-file upload remains a visible failure: existing PyPI hashes must match the
+external checksum record before any separately approved recovery uploads the
+missing file.
