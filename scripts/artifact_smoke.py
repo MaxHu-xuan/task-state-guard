@@ -504,7 +504,13 @@ def smoke(directory: Path) -> Dict[str, object]:
     wheel, sdist = _artifacts(directory.resolve(strict=True))
     wheel_files = _verify_wheel(wheel)
     with tempfile.TemporaryDirectory() as temporary:
-        temporary_root = Path(temporary)
+        # GitHub's Windows runners can expose the temporary directory through
+        # an 8.3 alias (for example, RUNNER~1) while venv resolves it to the
+        # long account name.  Passing that alias to EnvBuilder makes Python
+        # warn on stderr and can also make later interpreter paths disagree.
+        # Resolve the already-created directory before creating the venv so
+        # both the requested and actual environment locations use one path.
+        temporary_root = Path(os.path.realpath(temporary))
         source_root, sdist_files = _extract_sdist(
             sdist, temporary_root / "source"
         )
