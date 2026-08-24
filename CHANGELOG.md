@@ -28,6 +28,8 @@ All notable changes to TaskStateGuard are documented here. The format follows
   checks.
 - A cross-platform canonical source-archive builder that strips build-account
   ownership metadata, rejects unsafe members, and verifies unchanged content.
+- A deterministic, fully synthetic preview/apply/idempotent/doctor demo that
+  creates and removes its SQLite ledger at runtime.
 
 ### Fixed
 
@@ -52,3 +54,5 @@ All notable changes to TaskStateGuard are documented here. The format follows
 - Add answer-first English and Chinese guidance for agent restart recovery,
   SQLite task reconciliation, delivery acknowledgement, platform boundaries,
   and common integration questions.
+- Add a three-project chooser, platform-specific demo commands, draft v0.1.0
+  release notes, and an explicit candidate checklist.
