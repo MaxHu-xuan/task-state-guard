@@ -22,6 +22,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_LICENSE_SHA256 = (
     "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
 )
+EXPECTED_PROJECT_DESCRIPTION = (
+    "Preview and safely reconcile stale task and delivery records in a SQLite "
+    "ledger after agent timeouts or restarts, without marking unknown work "
+    "successful."
+)
 MAX_FILE_BYTES = 1_048_576
 _POSIX_MODE_AUDIT = os.name == "posix"
 SKIP_DIRECTORIES = frozenset((".git",))
@@ -104,11 +109,14 @@ REQUIRED_FILES = (
     "MANIFEST.in",
     "PROVENANCE.md",
     "README.md",
+    "RELEASE_CHECKLIST_v0.1.0.md",
+    "RELEASE_NOTES_v0.1.0.md",
     "RELEASING.md",
     "SECURITY.md",
     "SUPPORT.md",
     "THREAT_MODEL.md",
     "pyproject.toml",
+    "examples/restart_reconciliation_demo.py",
     "scripts/canonicalize_sdist.py",
     "scripts/artifact_smoke.py",
     "scripts/install_smoke.py",
@@ -340,6 +348,16 @@ def _metadata_checks(
     for pattern, code in checks:
         if not re.search(pattern, metadata):
             findings[("pyproject.toml", code)] += 1
+    description_assignments = re.findall(r"(?m)^description\s*=", metadata)
+    exact_description_pattern = (
+        r"(?m)^description\s*=\s*(['\"])"
+        + re.escape(EXPECTED_PROJECT_DESCRIPTION)
+        + r"\1\s*$"
+    )
+    if len(description_assignments) != 1 or not re.search(
+        exact_description_pattern, metadata
+    ):
+        findings[("pyproject.toml", "metadata.project_description_mismatch")] += 1
     if "License :: OSI Approved :: Apache Software License" in metadata:
         findings[("pyproject.toml", "metadata.pep639_classifier_conflict")] += 1
 
@@ -356,6 +374,8 @@ def _metadata_checks(
         "include LICENSE",
         "include PROVENANCE.md",
         "include README.md",
+        "include RELEASE_CHECKLIST_v0.1.0.md",
+        "include RELEASE_NOTES_v0.1.0.md",
         "include RELEASING.md",
         "include SECURITY.md",
         "include SUPPORT.md",
@@ -364,10 +384,84 @@ def _metadata_checks(
         "include scripts/artifact_smoke.py",
         "include scripts/install_smoke.py",
         "include scripts/privacy_audit.py",
+        "include examples/restart_reconciliation_demo.py",
         "recursive-include tests *.py",
     }
     for _entry in sorted(expected_manifest_lines - manifest_lines):
         findings[("MANIFEST.in", "metadata.sdist_entry_missing")] += 1
+
+    documentation_contracts = {
+        "README.md": (
+            "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest",
+            r"py -3 .\examples\restart_reconciliation_demo.py --allow-external-acl",
+            "[RELEASING.md](RELEASING.md)",
+            "the install-smoke helper is not a standalone check",
+        ),
+        "RELEASING.md": (
+            "python3 -m venv .venv",
+            "py -3 -m venv .venv",
+            'python -m pip install "build==1.3.0" "setuptools==77.0.3" "wheel==0.46.2"',
+            r'.\.venv\Scripts\python.exe -m pip install "build==1.3.0" "setuptools==77.0.3" "wheel==0.46.2"',
+            "python -m build --no-isolation",
+            r".\.venv\Scripts\python.exe -m build --no-isolation",
+            "python3 scripts/artifact_smoke.py dist",
+            r"py -3 .\scripts\artifact_smoke.py .\dist",
+            "python3 scripts/canonicalize_sdist.py --self-test",
+            r"py -3 .\scripts\canonicalize_sdist.py --self-test",
+            "`scripts/install_smoke.py` with that environment's interpreter",
+            "$previousPythonPath =",
+            "Remove-Item Env:PYTHONPATH",
+            "$env:PYTHONPATH = $previousPythonPath",
+        ),
+        "RELEASE_CHECKLIST_v0.1.0.md": (
+            "unit-suite command for the target platform from",
+            "platform-specific synthetic-demo command",
+            "platform-specific artifact-smoke command",
+            "offline install smoke",
+            "platform-specific canonicalizer self-test",
+        ),
+        "CONTRIBUTING.md": (
+            "python3 -m venv .venv",
+            "py -3 -m venv .venv",
+            "python3 scripts/artifact_smoke.py dist",
+            r".\.venv\Scripts\python.exe .\scripts\artifact_smoke.py .\dist",
+            "Do not run `scripts/install_smoke.py` directly",
+            "[RELEASING.md](RELEASING.md)",
+        ),
+        "SECURITY.md": (
+            "python3 scripts/privacy_audit.py",
+            r"py -3 .\scripts\privacy_audit.py",
+            "[RELEASING.md](RELEASING.md)",
+        ),
+    }
+    for relative, required_fragments in documentation_contracts.items():
+        try:
+            document = (root / relative).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        missing_count = sum(
+            fragment not in document for fragment in required_fragments
+        )
+        if missing_count:
+            findings[
+                (relative, "metadata.release_command_contract_mismatch")
+            ] += missing_count
+        if re.search(
+            r"(?m)^[ \t]*(?:\./|\.\\)?scripts(?:/|\\)[^\s]+\.py(?:\s|$)",
+            document,
+        ):
+            findings[(relative, "metadata.bare_python_script_command")] += 1
+        if re.search(
+            r"(?m)^[ \t]*(?:python(?:3(?:\.\d+)?)?|py\s+-3)\s+"
+            r"(?:\.\\|\./)?scripts(?:/|\\)install_smoke\.py\s*$",
+            document,
+        ):
+            findings[(relative, "metadata.uninstalled_smoke_command")] += 1
+        if (
+            _joined("python3", ".12") in document
+            or _joined("py -3", ".12") in document
+        ):
+            findings[(relative, "metadata.fixed_minor_interpreter_command")] += 1
 
 
 def _imported_modules(tree: ast.AST) -> Iterator[str]:
@@ -509,6 +603,41 @@ def self_test() -> bool:
 
     with tempfile.TemporaryDirectory() as directory:
         temporary_root = Path(directory)
+        description_root = temporary_root / "description-canary"
+        description_root.mkdir()
+        description_marker = "synthetic-description-change"
+        project_metadata = (PROJECT_ROOT / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        expected_description_line = (
+            'description = "' + EXPECTED_PROJECT_DESCRIPTION + '"'
+        )
+        if project_metadata.count(expected_description_line) != 1:
+            return False
+        (description_root / "pyproject.toml").write_text(
+            project_metadata.replace(
+                expected_description_line,
+                'description = "' + description_marker + '"',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        (description_root / "MANIFEST.in").write_bytes(
+            (PROJECT_ROOT / "MANIFEST.in").read_bytes()
+        )
+        description_report = audit(description_root, sdist=True)
+        description_codes = {
+            row["code"] for row in description_report["findings"]
+        }
+        description_encoded = json.dumps(
+            description_report, sort_keys=True, separators=(",", ":")
+        )
+        description_check_ok = (
+            not description_report["ok"]
+            and "metadata.project_description_mismatch" in description_codes
+            and description_marker not in description_encoded
+        )
+
         root = temporary_root / "canaries"
         root.mkdir()
         sensitive_values = (
@@ -635,7 +764,8 @@ def self_test() -> bool:
         }
 
         return (
-            canary_checks_ok
+            description_check_ok
+            and canary_checks_ok
             and not ordinary_report["ok"]
             and (
                 SDIST_EGG_INFO_DIRECTORY,

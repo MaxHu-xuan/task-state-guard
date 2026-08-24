@@ -4,6 +4,8 @@ include CONTRIBUTING.md
 include LICENSE
 include PROVENANCE.md
 include README.md
+include RELEASE_CHECKLIST_v0.1.0.md
+include RELEASE_NOTES_v0.1.0.md
 include RELEASING.md
 include SECURITY.md
 include SUPPORT.md
@@ -12,4 +14,5 @@ include scripts/canonicalize_sdist.py
 include scripts/artifact_smoke.py
 include scripts/install_smoke.py
 include scripts/privacy_audit.py
+include examples/restart_reconciliation_demo.py
 recursive-include tests *.py

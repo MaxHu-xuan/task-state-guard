@@ -91,10 +91,10 @@ jobs:
         run: |
           python scripts/privacy_audit.py
           python scripts/privacy_audit.py --self-test
-      - name: Install the pinned build frontend
-        run: python -m pip install "build==1.3.0"
+      - name: Install the pinned build toolchain
+        run: python -m pip install "build==1.3.0" "setuptools==77.0.3" "wheel==0.46.2"
       - name: Build wheel and source distribution
-        run: python -m build
+        run: python -m build --no-isolation
       - name: Canonicalize and verify the source distribution
         run: python scripts/canonicalize_sdist.py --dist-dir dist --output-dir canonical-dist --source-date-epoch 946684800
       - name: Inspect, audit, install, and smoke-test artifacts

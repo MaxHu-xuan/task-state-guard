@@ -58,9 +58,24 @@ rules in `CONTRIBUTING.md`.
 - Expect only the database and SQLite-managed `-journal`, `-wal`, or `-shm`
   sidecars in the state directory; TaskStateGuard creates no application scratch
   or export file and contains no network or telemetry integration.
-- Run `python3.12 scripts/privacy_audit.py` and
-  `python3.12 scripts/privacy_audit.py --self-test` before creating a release
-  artifact.
+- Run both privacy-audit modes before creating a release artifact. From the
+  repository root on macOS or Linux:
+
+  ```bash
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/privacy_audit.py
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/privacy_audit.py --self-test
+  ```
+
+  On Windows PowerShell:
+
+  ```powershell
+  $env:PYTHONDONTWRITEBYTECODE = "1"
+  py -3 .\scripts\privacy_audit.py
+  py -3 .\scripts\privacy_audit.py --self-test
+  ```
+
+  Confirm that the selected interpreter is CPython 3.11 through 3.14, and use
+  the complete platform-specific release gate in [RELEASING.md](RELEASING.md).
 
 TaskStateGuard treats the current OS user as trusted. A malicious same-user
 process, privileged host actor, incorrectly configured external Windows DACL,

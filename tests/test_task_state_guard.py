@@ -1620,6 +1620,46 @@ class LedgerTestCase(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertNotIn(digest, stdout.getvalue())
 
+    def test_restart_reconciliation_demo_is_deterministic_and_values_free(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / (
+            "restart_reconciliation_demo.py"
+        )
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+        outputs = []
+        for _ in range(2):
+            command = [sys.executable, str(script)]
+            if os.name == "nt":
+                command.append("--allow-external-acl")
+            completed = subprocess.run(
+                command,
+                cwd=str(script.parent.parent),
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                timeout=60,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(completed.stderr, "")
+            outputs.append(completed.stdout)
+
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertIn("[preview] command:", outputs[0])
+        self.assertIn('"dry_run":true', outputs[0])
+        self.assertIn("[apply] command:", outputs[0])
+        self.assertIn('"tasks_timed_out":1', outputs[0])
+        self.assertIn("[idempotent-recheck] command:", outputs[0])
+        self.assertIn('"tasks_timed_out":0', outputs[0])
+        self.assertIn("[doctor] command:", outputs[0])
+        self.assertIn('"healthy":true', outputs[0])
+        self.assertNotIn(str(Path(tempfile.gettempdir())), outputs[0])
+        self.assertNotIn("payload", outputs[0].casefold())
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--ledger-worker":

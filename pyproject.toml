@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "task-state-guard"
 version = "0.1.0"
-description = "Preview and reconcile SQLite task and delivery state after agent timeouts or restarts"
+description = "Preview and safely reconcile stale task and delivery records in a SQLite ledger after agent timeouts or restarts, without marking unknown work successful."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "TaskStateGuard contributors" }]
@@ -15,13 +15,13 @@ keywords = [
   "agent-runtime",
   "ai-agents",
   "delivery-state",
-  "restart-recovery",
+  "restart-reconciliation",
   "sqlite",
-  "stuck-task-recovery",
+  "stale-tasks",
   "task-state-machine",
   "task-state-reconciliation",
   "terminal-state",
-  "timeout-recovery",
+  "timeout-reconciliation",
   "workflow-observability",
 ]
 classifiers = [

@@ -1,20 +1,31 @@
 # TaskStateGuard（任务状态守护）
 
-任务状态守护：让重启后的任务状态可以核对、预览、收敛和解释。
-
 [![CI](https://github.com/MaxHu-xuan/task-state-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/MaxHu-xuan/task-state-guard/actions/workflows/ci.yml)
 
-[中文](#中文) · [English](#english) · [Technical reference](#technical-reference)
+[中文](#中文) · [English](#english) · [运行合成演示](#2-运行完全合成的演示) ·
+[Technical reference](#technical-reference)
 
 ## 中文
 
-TaskStateGuard 是一个面向 AI 智能体、后台 worker 和本地工作流的 SQLite
-任务状态账本。它分别记录任务是否结束、结果是否送达，并在进程超时、崩溃或重启后，
-按明确的截止时间和宽限期收敛遗留状态。
+服务重启后，`running` 任务和 `pending` 投递很容易继续留在界面里，却没人能确认它们
+是否真的还在工作。TaskStateGuard 是面向 AI 智能体、后台 worker 和本地工作流的
+嵌入式 SQLite 状态对账护栏。它把任务终态与投递终态分开，按明确的截止时间和
+宽限期收敛遗留状态；你可以先看只含汇总数字的预览，再决定是否应用，`doctor`
+健康检查同样不会列出任务明细。
 
-它解决的是任务状态对账（task state reconciliation），以及重启后卡住任务的状态收敛
-（stuck task recovery），不是恢复中断的计算。系统没有观测到成功或投递回执时，
-TaskStateGuard 不会猜测成功。
+它解决的是任务状态对账（task state reconciliation）和重启后卡住任务的状态收敛
+（stuck task recovery）。它不是队列、执行器或计算续跑工具，也不承诺恰好一次；系统没有
+观测到成功或投递回执时，TaskStateGuard 不会把未知结果猜成成功或已送达。
+
+### 三个工具怎么选
+
+| 你需要解决的问题 | 选择 |
+|---|---|
+| 重启后核对卡住任务、超时与待投递状态，不把未知结果猜成成功 | TaskStateGuard（任务状态守护），当前项目 |
+| 分享或迁移聊天导出前，本地检查疑似秘密、个人信息形态、格式、SQLite 与扫描盲区 | [ChatArchiveGuard（聊天归档守护）](https://github.com/MaxHu-xuan/chat-archive-guard) |
+| 确认最终 PPTX 及随附验收证据仍匹配结构检查后生成的 HMAC 签名收据 | [ArtifactProof（PPTX 交付物验真）](https://github.com/MaxHu-xuan/artifactproof) |
+
+三个项目都可以独立使用；它们分别守护状态、聊天归档和 PPTX 交付物，不会互相读取数据。
 
 ### 它能带来什么
 
@@ -23,7 +34,7 @@ TaskStateGuard 不会猜测成功。
 | 服务重启后，一批任务一直显示 `running` | 超过截止时间或活跃宽限期的任务转为 `timed_out`；仍然新鲜的任务保持不变 |
 | 任务已经结束，但用户是否收到结果并不确定 | 投递状态继续保持 `pending`，直到真实回执或投递宽限期到期 |
 | 内部子任务完成后不应单独向用户投递 | 终态内部任务在宽限期后转为 `not_applicable`，不会伪装成已送达 |
-| 执行恢复前需要知道会改动多少记录 | `reconcile --dry-run` 返回同一时刻将发生的聚合计数，不修改任务、事件或数据库 |
+| 收敛遗留状态前需要知道会改动多少记录 | `reconcile --dry-run` 返回同一时刻将发生的聚合计数，不修改任务、事件或数据库 |
 | 运维需要判断工作流账本是否可信 | `doctor` 检查数据库、schema、状态、时间戳和事件链，只返回聚合计数 |
 | Linux、macOS 和 Windows 需要共用一套状态语义 | 状态机一致；文件保护按 POSIX 权限或外部管理的 Windows DACL 分别处理 |
 
@@ -77,13 +88,46 @@ python -m pip install .
 Windows PowerShell：
 
 ```powershell
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
 
 支持 CPython 3.11 至 3.14。运行时代码只使用 Python 标准库，不包含网络请求或遥测。
 
-#### 2. 只记录真实发生的状态变化
+#### 2. 运行完全合成的演示
+
+演示只使用固定的公开样例状态，在系统临时目录创建 SQLite，调用真实 CLI 完成
+preview、apply、幂等复查和 `doctor`，结束后自动删除临时数据库。它不读取本机任务数据，
+也不包含提示词、消息、任务正文或真实标识。
+
+Linux 或 macOS：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 examples/restart_reconciliation_demo.py
+```
+
+Windows PowerShell：
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE = "1"
+$env:PYTHONPATH = "src"
+py -3 .\examples\restart_reconciliation_demo.py --allow-external-acl
+```
+
+真实演示中的前三个聚合结果如下；`<temporary-demo>` 是刻意使用的、不包含本机信息的
+路径占位符：
+
+```text
+[preview] output: {"ok":true,"reconcile":{"active_examined":2,"applied":false,"deliveries_failed":1,"deliveries_not_applicable":1,"dry_run":true,"fresh_active_retained":1,"pending_delivery_examined":3,"pending_delivery_retained":1,"tasks_timed_out":1}}
+[apply] output: {"ok":true,"reconcile":{"active_examined":2,"applied":true,"deliveries_failed":1,"deliveries_not_applicable":1,"dry_run":false,"fresh_active_retained":1,"pending_delivery_examined":3,"pending_delivery_retained":1,"tasks_timed_out":1}}
+[idempotent-recheck] output: {"ok":true,"reconcile":{"active_examined":1,"applied":true,"deliveries_failed":0,"deliveries_not_applicable":0,"dry_run":false,"fresh_active_retained":1,"pending_delivery_examined":1,"pending_delivery_retained":1,"tasks_timed_out":0}}
+```
+
+第三次没有再次改写已经闭合的记录；仍保留的 `queued` 和刚刚进入 `timed_out` 的投递解释了
+两个 retained 计数。完整命令与只含汇总数字的 `doctor` 输出由脚本直接打印，并在测试中
+连续运行两次验证一致性。
+
+#### 3. 只记录真实发生的状态变化
 
 ```python
 from task_state_guard import Ledger
@@ -106,7 +150,7 @@ ledger.set_delivery(
 在 Windows 上，数据库父目录必须提前存在，并由管理员或部署系统设置为仅服务账户可访问的
 私有 DACL。只有确认该边界已经建立后，才传入 `allow_external_acl=True`。
 
-#### 3. 先预览，再执行重启收敛
+#### 4. 先预览，再执行重启收敛
 
 ```bash
 task-state-guard --db ./private-state/tasks.sqlite reconcile \
@@ -144,6 +188,19 @@ Windows CLI 需要把 DACL 确认参数放在子命令之前：
 ```
 
 `--allow-external-acl` 只确认调用方已配置私有 DACL，不会创建、检查或认证 DACL。
+
+### Linux、macOS 与 Windows 命令差异
+
+| 平台 | 源码与虚拟环境命令 | 文件保护与 CLI 注意事项 |
+|---|---|---|
+| Linux | 通常使用 `python3`、`. .venv/bin/activate`、`PYTHONPATH=src` 和 `/` 路径 | 项目检查并收紧 POSIX 文件模式；数据库必须在本地文件系统 |
+| macOS | 与 Linux 使用相同的 shell 写法和 `/` 路径 | 同样执行 POSIX 模式与链接检查；数据库必须在本地文件系统 |
+| Windows PowerShell | 使用 `py -3`、`$env:PYTHONPATH = "src"` 和 `\` 路径 | 先由外部配置私有 DACL，并把 `--allow-external-acl` 放在子命令之前 |
+
+三个平台的任务与投递状态语义相同；差异只在命令写法和本地文件保护边界。在 Windows
+上，合成演示只有收到显式参数后才会加入 DACL 确认，但仍不会替你配置或验证 DACL。
+运行前请先确认临时目录的 DACL 边界，并确认上述 `python3` 或 `py -3` 实际选择的是
+受支持的 CPython 3.11 至 3.14。
 
 ### 工作流可观测性
 
@@ -220,15 +277,19 @@ payload fingerprint 是可关联的假名化元数据，不是匿名数据；低
 
 ## English
 
-TaskStateGuard is a local SQLite task-state ledger for AI agents, background
-workers, and workflow runtimes. It records whether work reached a terminal state
-separately from whether its result was delivered, then reconciles stale state
-after timeouts, crashes, or process restarts using explicit deadlines and grace
-periods.
+After a service restarts, `running` tasks and `pending` deliveries can remain
+visible even when no one can confirm that they are still active. TaskStateGuard
+is an embedded SQLite reconciliation guardrail for AI agents, background workers,
+and local workflow runtimes. It keeps task terminal state separate from delivery
+terminal state and reconciles stale state using explicit deadlines and grace
+periods. You can preview aggregate changes before applying them, then use a
+counts-only `doctor` to check the ledger.
 
-It provides task state reconciliation and stuck task recovery for metadata. It
-does not resume interrupted computation, and it never invents successful work or
-delivery when the surrounding system has not observed it.
+It provides task-state reconciliation and stuck-task recovery for metadata. It
+is not a queue, executor, or computation-resumption tool and makes no exactly-once
+guarantee. When the surrounding system has not observed success or a delivery
+acknowledgement, TaskStateGuard does not guess that the work succeeded or was
+delivered.
 
 ### What it gives you
 
@@ -237,7 +298,7 @@ delivery when the surrounding system has not observed it.
 | A service restarts while tasks remain `running` | Tasks past their deadline or active grace become `timed_out`; fresh tasks remain unchanged |
 | Work is terminal but user-facing delivery is uncertain | The `delivery state` stays `pending` until a real acknowledgement or the delivery grace expires |
 | An internal child task should not create its own delivery obligation | The terminal internal task becomes `not_applicable` after grace instead of pretending it was delivered |
-| You need to see the impact before applying recovery | `reconcile --dry-run` returns the aggregate changes for that moment without updating tasks, events, or the database |
+| You need to see the impact before applying reconciliation | `reconcile --dry-run` returns the aggregate changes for that moment without updating tasks, events, or the database |
 | Operations needs to decide whether the ledger is trustworthy | `doctor` checks the database, schema, state, timestamps, and event chains and emits aggregate counts |
 | Linux, macOS, and Windows need one state contract | The state model is portable; storage protection uses POSIX modes or a caller-managed Windows DACL |
 
@@ -247,6 +308,17 @@ TaskStateGuard fits runtimes that need:
 - a clear boundary between terminal state and delivery state;
 - explicit timeout recovery without guessing that work succeeded;
 - workflow observability without storing prompts or task bodies.
+
+### Choose among the three tools
+
+| Problem to solve | Choose |
+|---|---|
+| After a restart, reconcile stuck tasks, timeouts, and pending delivery without guessing success | TaskStateGuard, this project |
+| Before sharing or migrating a chat export, locally audit potential secrets, personal-data patterns, format or SQLite issues, and scan gaps | [ChatArchiveGuard](https://github.com/MaxHu-xuan/chat-archive-guard) |
+| Verify that a final PPTX and its supplied QA evidence still match the HMAC-signed receipt created after structural checks | [ArtifactProof](https://github.com/MaxHu-xuan/artifactproof) |
+
+Each project works independently. They protect state, chat archives, and PPTX
+artifacts respectively, without reading one another's data.
 
 ### State model
 
@@ -292,14 +364,50 @@ python -m pip install .
 Windows PowerShell:
 
 ```powershell
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
 
 TaskStateGuard supports CPython 3.11 through 3.14. Runtime code uses only the
 Python standard library and has no network or telemetry path.
 
-#### 2. Record only observed transitions
+#### 2. Run the fully synthetic demonstration
+
+The demonstration creates a SQLite database under the system temporary
+directory from fixed public sample states, invokes the real CLI for preview,
+apply, an idempotent recheck, and `doctor`, then removes the database. It does
+not read local task data or contain prompts, messages, task bodies, or real
+identifiers.
+
+Linux or macOS:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 examples/restart_reconciliation_demo.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE = "1"
+$env:PYTHONPATH = "src"
+py -3 .\examples\restart_reconciliation_demo.py --allow-external-acl
+```
+
+The first three aggregate results from the real demonstration are shown below.
+`<temporary-demo>` is an intentional non-identifying path placeholder:
+
+```text
+[preview] output: {"ok":true,"reconcile":{"active_examined":2,"applied":false,"deliveries_failed":1,"deliveries_not_applicable":1,"dry_run":true,"fresh_active_retained":1,"pending_delivery_examined":3,"pending_delivery_retained":1,"tasks_timed_out":1}}
+[apply] output: {"ok":true,"reconcile":{"active_examined":2,"applied":true,"deliveries_failed":1,"deliveries_not_applicable":1,"dry_run":false,"fresh_active_retained":1,"pending_delivery_examined":3,"pending_delivery_retained":1,"tasks_timed_out":1}}
+[idempotent-recheck] output: {"ok":true,"reconcile":{"active_examined":1,"applied":true,"deliveries_failed":0,"deliveries_not_applicable":0,"dry_run":false,"fresh_active_retained":1,"pending_delivery_examined":1,"pending_delivery_retained":1,"tasks_timed_out":0}}
+```
+
+The third pass does not rewrite already closed records. The retained queued
+task and the newly timed-out task's delivery account for the remaining counts.
+The script prints every command and the full counts-only `doctor` report; the
+test suite runs it twice and requires byte-identical output.
+
+#### 3. Record only observed transitions
 
 ```python
 from task_state_guard import Ledger
@@ -323,7 +431,7 @@ On Windows, the database parent directory must already exist with a private DACL
 restricted to the service account. Pass `allow_external_acl=True` only after an
 administrator or deployment system has established that boundary.
 
-#### 3. Preview, then apply restart reconciliation
+#### 4. Preview, then apply restart reconciliation
 
 ```bash
 task-state-guard --db ./private-state/tasks.sqlite reconcile \
@@ -368,6 +476,21 @@ For the Windows CLI, place the DACL acknowledgement before the subcommand:
 
 `--allow-external-acl` acknowledges a boundary managed by the caller. It does
 not create, inspect, or certify a Windows DACL.
+
+### Linux, macOS, and Windows command differences
+
+| Platform | Source and environment syntax | Storage and CLI note |
+|---|---|---|
+| Linux | Typically `python3`, `. .venv/bin/activate`, `PYTHONPATH=src`, and `/` paths | TaskStateGuard checks and tightens POSIX modes; keep the database on a local filesystem |
+| macOS | The same shell syntax and `/` paths as Linux | The same POSIX mode and link checks apply; keep the database on a local filesystem |
+| Windows PowerShell | `py -3`, `$env:PYTHONPATH = "src"`, and `\` paths | Configure a private DACL externally and place `--allow-external-acl` before the subcommand |
+
+Task and delivery semantics are identical on all three platforms. Only command
+syntax and local storage protection differ. On Windows, the synthetic demo adds
+the DACL acknowledgement only after receiving its explicit command-line flag;
+it does not configure or verify a DACL. Confirm the temporary directory's DACL
+boundary first. Also confirm that `python3` or `py -3` selects a supported
+CPython 3.11 through 3.14 interpreter.
 
 ### Workflow observability
 
@@ -607,14 +730,36 @@ with SQLite-safe tooling and perform a private, explicit migration.
 
 ### Development and release checks
 
+Run source-tree checks from the repository root with a supported interpreter.
+
+macOS or Linux:
+
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3.12 -m unittest discover -s tests -v
-PYTHONDONTWRITEBYTECODE=1 python3.12 scripts/privacy_audit.py
-PYTHONDONTWRITEBYTECODE=1 python3.12 scripts/privacy_audit.py --self-test
-PYTHONDONTWRITEBYTECODE=1 python3.12 scripts/privacy_audit.py --sdist /path/to/extracted-sdist
-python3.12 scripts/install_smoke.py
-python3.12 scripts/artifact_smoke.py dist
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 examples/restart_reconciliation_demo.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/privacy_audit.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/privacy_audit.py --self-test
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/privacy_audit.py --sdist /path/to/extracted-sdist
 ```
+
+Windows PowerShell:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE = "1"
+$env:PYTHONPATH = "src"
+py -3 -m unittest discover -s tests -v
+py -3 .\examples\restart_reconciliation_demo.py --allow-external-acl
+py -3 .\scripts\privacy_audit.py
+py -3 .\scripts\privacy_audit.py --self-test
+py -3 .\scripts\privacy_audit.py --sdist .\path\to\extracted-sdist
+```
+
+For reproducible wheel and sdist builds, artifact inspection, canonicalization,
+and the exact cross-platform commands, follow [RELEASING.md](RELEASING.md).
+`artifact_smoke.py` creates an isolated temporary environment, installs the
+built wheel offline, and invokes `scripts/install_smoke.py` with that
+environment's interpreter; the install-smoke helper is not a standalone check
+for an uninstalled checkout.
 
 The synthetic test suite covers deadlines and restart grace, cancellation,
 parent/child relationships, delivery reconciliation, concurrent idempotent
@@ -651,4 +796,8 @@ Apache License, Version 2.0. See [LICENSE](LICENSE),
 [PROVENANCE.md](PROVENANCE.md), [CONTRIBUTING.md](CONTRIBUTING.md),
 [SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md),
 [CHANGELOG.md](CHANGELOG.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
-[RELEASING.md](RELEASING.md), and [THREAT_MODEL.md](THREAT_MODEL.md).
+[RELEASING.md](RELEASING.md),
+[v0.1.0 release checklist](RELEASE_CHECKLIST_v0.1.0.md),
+[draft v0.1.0 release notes](RELEASE_NOTES_v0.1.0.md), and
+[THREAT_MODEL.md](THREAT_MODEL.md). No tag, package upload, or release is implied
+by these preparation files.
