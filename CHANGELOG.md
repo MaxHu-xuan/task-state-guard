@@ -58,6 +58,10 @@ All notable changes to TaskStateGuard are documented here. The format follows
 
 ### Documentation
 
+- Present the PyPI package as the default installation path for release users,
+  while retaining a clearly separated reviewed-checkout path for contributors.
+- Publish the v0.1.0 release notes as independent, complete Chinese and English
+  sections.
 - Add answer-first English and Chinese guidance for agent restart recovery,
   SQLite task reconciliation, delivery acknowledgement, platform boundaries,
   and common integration questions.

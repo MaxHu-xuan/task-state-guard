@@ -397,7 +397,7 @@ def _metadata_checks(
         "README.md": (
             "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest",
             r"py -3 .\examples\restart_reconciliation_demo.py --allow-external-acl",
-            "[RELEASING.md](RELEASING.md)",
+            "[RELEASING.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/RELEASING.md)",
             "the install-smoke helper is not a standalone check",
         ),
         "RELEASING.md": (
