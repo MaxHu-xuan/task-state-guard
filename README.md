@@ -75,28 +75,35 @@ pending ──> delivered | failed | not_applicable
 
 ### 快速开始
 
-#### 1. 从已审查的源码安装
+#### 1. 安装 TaskStateGuard
+
+对于已经发布到 PyPI 的版本，普通用户建议在虚拟环境中安装 TaskStateGuard。
 
 Linux 或 macOS：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install .
+python -m pip install task-state-guard
 ```
 
 Windows PowerShell：
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe -m pip install task-state-guard
 ```
+
+如需审阅尚未发布的修改或参与开发，请先确认源码来源和目标提交，再在已核对的源码仓库
+根目录创建独立虚拟环境，并将最后一条安装命令改为 `python -m pip install .`
+（Windows 使用 `.\.venv\Scripts\python.exe -m pip install .`）。
 
 支持 CPython 3.11 至 3.14。运行时代码只使用 Python 标准库，不包含网络请求或遥测。
 
 #### 2. 运行完全合成的演示
 
-演示只使用固定的公开样例状态，在系统临时目录创建 SQLite，调用真实 CLI 完成
+演示脚本随源码仓库提供，不包含在 wheel 中。请从仓库根目录运行；它只使用固定的公开
+样例状态，在系统临时目录创建 SQLite，调用真实 CLI 完成
 preview、apply、幂等复查和 `doctor`，结束后自动删除临时数据库。它不读取本机任务数据，
 也不包含提示词、消息、任务正文或真实标识。
 
@@ -234,7 +241,7 @@ payload fingerprint 是可关联的假名化元数据，不是匿名数据；低
 - Linux 和 macOS 使用目录/文件模式与链接检查；Windows 的私有 DACL 由外部系统负责，
   Python 标准库无法验证它是否等价于 POSIX `0600`。
 - 同一操作系统用户身份下的其他进程被视为可信；完整威胁边界见
-  [THREAT_MODEL.md](THREAT_MODEL.md)。
+  [THREAT_MODEL.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/THREAT_MODEL.md)。
 
 ### 常见问题
 
@@ -351,33 +358,42 @@ The two state machines answer different questions:
 
 ### Quick start
 
-#### 1. Install from a reviewed checkout
+#### 1. Install TaskStateGuard
+
+After a release is published to PyPI, most users should install TaskStateGuard
+in a virtual environment.
 
 Linux or macOS:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install .
+python -m pip install task-state-guard
 ```
 
 Windows PowerShell:
 
 ```powershell
 py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe -m pip install task-state-guard
 ```
+
+To review unreleased changes or contribute, first verify the source and target
+commit. Then create an isolated environment from that checkout's repository root
+and replace the final command with `python -m pip install .` (on Windows, use
+`.\.venv\Scripts\python.exe -m pip install .`).
 
 TaskStateGuard supports CPython 3.11 through 3.14. Runtime code uses only the
 Python standard library and has no network or telemetry path.
 
 #### 2. Run the fully synthetic demonstration
 
-The demonstration creates a SQLite database under the system temporary
-directory from fixed public sample states, invokes the real CLI for preview,
-apply, an idempotent recheck, and `doctor`, then removes the database. It does
-not read local task data or contain prompts, messages, task bodies, or real
-identifiers.
+The demo script is provided in the source repository and is not included in the
+wheel. Run it from the repository root. It creates a SQLite database under the
+system temporary directory from fixed public sample states, invokes the real CLI
+for preview, apply, an idempotent recheck, and `doctor`, then removes the
+database. It does not read local task data or contain prompts, messages, task
+bodies, or real identifiers.
 
 Linux or macOS:
 
@@ -533,7 +549,8 @@ when low-entropy content could be guessed offline.
   DACL managed by the caller; the Python standard library cannot verify that it
   is equivalent to POSIX `0600`.
 - Other processes with the same OS user identity are trusted. See
-  [THREAT_MODEL.md](THREAT_MODEL.md) for the full boundary.
+  [THREAT_MODEL.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/THREAT_MODEL.md)
+  for the full boundary.
 
 ### FAQ
 
@@ -755,7 +772,8 @@ py -3 .\scripts\privacy_audit.py --sdist .\path\to\extracted-sdist
 ```
 
 For reproducible wheel and sdist builds, artifact inspection, canonicalization,
-and the exact cross-platform commands, follow [RELEASING.md](RELEASING.md).
+and the exact cross-platform commands, follow
+[RELEASING.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/RELEASING.md).
 `artifact_smoke.py` creates an isolated temporary environment, installs the
 built wheel offline, and invokes `scripts/install_smoke.py` with that
 environment's interpreter; the install-smoke helper is not a standalone check
@@ -792,12 +810,18 @@ state behavior; they do not claim to inspect or establish a DACL.
 ## Project status
 
 TaskStateGuard is an alpha-stage clean-room implementation licensed under the
-Apache License, Version 2.0. See [LICENSE](LICENSE),
-[PROVENANCE.md](PROVENANCE.md), [CONTRIBUTING.md](CONTRIBUTING.md),
-[SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md),
-[CHANGELOG.md](CHANGELOG.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
-[RELEASING.md](RELEASING.md),
-[v0.1.0 release checklist](RELEASE_CHECKLIST_v0.1.0.md),
-[draft v0.1.0 release notes](RELEASE_NOTES_v0.1.0.md), and
-[THREAT_MODEL.md](THREAT_MODEL.md). No tag, package upload, or release is implied
-by these preparation files.
+Apache License, Version 2.0. See
+[LICENSE](https://github.com/MaxHu-xuan/task-state-guard/blob/main/LICENSE),
+[PROVENANCE.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/PROVENANCE.md),
+[CONTRIBUTING.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/CONTRIBUTING.md),
+[SECURITY.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/SECURITY.md),
+[SUPPORT.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/SUPPORT.md),
+[CHANGELOG.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/CHANGELOG.md),
+[CODE_OF_CONDUCT.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/CODE_OF_CONDUCT.md),
+[RELEASING.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/RELEASING.md),
+[v0.1.0 release checklist](https://github.com/MaxHu-xuan/task-state-guard/blob/main/RELEASE_CHECKLIST_v0.1.0.md),
+[v0.1.0 release notes](https://github.com/MaxHu-xuan/task-state-guard/blob/main/RELEASE_NOTES_v0.1.0.md),
+and [THREAT_MODEL.md](https://github.com/MaxHu-xuan/task-state-guard/blob/main/THREAT_MODEL.md).
+Maintainer checklists and release-process documents describe the required
+evidence; their presence alone is not proof that a tag, GitHub Release, or
+package publication has completed.
